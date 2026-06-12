@@ -1,0 +1,20 @@
+{
+  "profiles" : [
+    {
+      "aspectRatio" : 1.0028662934357653,
+      "averageArea" : 0.014664470626765137,
+      "averageHeight" : 0.12092376972503543,
+      "averageWidth" : 0.1212703727324263,
+      "borderBrightness" : 0.3058017397198609,
+      "contrast" : 0.17390638375828693,
+      "createdAt" : "2026-06-11T12:40:36Z",
+      "edgeStrength" : 0.14483936405870412,
+      "id" : "DAE7F06A-82B6-4C39-B888-A25B68FD7463",
+      "interiorBrightness" : 0.47970812347814784,
+      "layout" : "胶片扫描",
+      "regionCount" : 36,
+      "sourceName" : "微信图片_20260610213857_11_4.jpg"
+    }
+  ],
+  "version" : 1
+}

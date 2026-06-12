@@ -1,0 +1,22 @@
+.DS_Store
+
+# Swift Package Manager build output
+项目源码/.build/
+
+# Packaged apps, installers, and generated archives
+项目源码/dist/
+可运行安装包/
+*.app/
+*.dmg
+*.zip
+
+# Python local caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
