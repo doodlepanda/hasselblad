@@ -184,6 +184,7 @@ final class LegacyWindowController: NSViewController {
     private var selectedPhotoIndex = 0
     private var exportDirectory: URL?
     private var templateRect: CGRect?
+    private var templateImageAspect: Double?
     private var exportFormat: LegacyExportFormat = .tif
 
     private var selectedTask: LegacyTask? {
@@ -225,6 +226,7 @@ final class LegacyWindowController: NSViewController {
         canvas.layer?.masksToBounds = true
         canvas.onCropChanged = { [weak self] rect in
             self?.templateRect = rect
+            self?.templateImageAspect = self?.selectedPhoto.flatMap { Self.imageAspect(url: $0.url) }
             self?.saveCurrentCrops()
             self?.refreshSummary()
         }
@@ -598,7 +600,7 @@ final class LegacyWindowController: NSViewController {
             statusLabel.stringValue = "没有找到可处理图片。"
             return
         }
-        let template = templateRect
+        let template = templateCompatible(with: found.first) ? templateRect : nil
         let photos = found.map { url in
             let crop = template ?? CGRect(x: 0.05, y: 0.08, width: 0.18, height: 0.72)
             return LegacyPhoto(url: url, crops: [LegacyCrop(rect: crop)])
@@ -610,6 +612,7 @@ final class LegacyWindowController: NSViewController {
         selectedPhotoIndex = 0
         exportDirectory = found.first?.deletingLastPathComponent()
         templateRect = photos.first?.crops.first?.rect ?? template
+        templateImageAspect = found.first.flatMap { Self.imageAspect(url: $0) }
         rebuildTaskPopup()
         rebuildPhotoPopup()
         rebuildFilmstrip()
@@ -645,7 +648,35 @@ final class LegacyWindowController: NSViewController {
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = canvas.crops
         if let selected = canvas.currentTemplateRect {
             templateRect = selected
+            templateImageAspect = selectedPhoto.flatMap { Self.imageAspect(url: $0.url) }
         }
+    }
+
+    private func templateCompatible(with url: URL?) -> Bool {
+        guard let templateImageAspect,
+              let url,
+              let currentAspect = Self.imageAspect(url: url) else {
+            return true
+        }
+        let diff = abs(currentAspect - templateImageAspect) / max(max(currentAspect, templateImageAspect), 0.0001)
+        return diff < 0.18
+    }
+
+    private static func imageAspect(url: URL) -> Double? {
+        guard let source = CGImageSourceCreateWithURL(
+            url as CFURL,
+            [
+                kCGImageSourceShouldCache: false,
+                kCGImageSourceShouldCacheImmediately: false
+            ] as CFDictionary
+        ),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              height > 0 else {
+            return nil
+        }
+        return Double(width) / Double(height)
     }
 
     private func rebuildTaskPopup() {
@@ -1764,7 +1795,8 @@ enum LegacyExporter {
     }
 
     private static func pixelCropRect(from crop: LegacyCrop, imageWidth: Int, imageHeight: Int) -> CGRect {
-        let normalized = crop.angle == 0 ? crop.rect.normalized : rotatedBoundingRect(crop).normalized
+        let raw = crop.angle == 0 ? crop.rect.normalized : rotatedBoundingRect(crop).normalized
+        let normalized = sourceCropRect(for: raw, imageWidth: imageWidth, imageHeight: imageHeight)
         let imageWidth = CGFloat(imageWidth)
         let imageHeight = CGFloat(imageHeight)
         let x = floor(normalized.minX * imageWidth)
@@ -1777,6 +1809,26 @@ enum LegacyExporter {
             width: min(max(width, 1), imageWidth - min(max(x, 0), imageWidth - 1)),
             height: min(max(height, 1), imageHeight - min(max(y, 0), imageHeight - 1))
         ).integral
+    }
+
+    private static func sourceCropRect(for rect: CGRect, imageWidth: Int, imageHeight: Int) -> CGRect {
+        let crop = rect.normalized
+        let sourceAspect = CGFloat(imageHeight) / max(CGFloat(imageWidth), 1)
+        let cropAspect = crop.height / max(crop.width, 0.0001)
+
+        if sourceAspect > 2.5,
+           cropAspect > 2.5,
+           crop.width < 0.35,
+           crop.height > 0.55 {
+            return CGRect(
+                x: 1 - crop.maxY,
+                y: crop.minX,
+                width: crop.height,
+                height: crop.width
+            ).normalized
+        }
+
+        return crop
     }
 
     private static func rotatedBoundingRect(_ crop: LegacyCrop) -> CGRect {

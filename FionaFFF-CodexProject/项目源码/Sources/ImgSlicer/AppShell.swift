@@ -7,27 +7,20 @@ struct AppShell: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
-        HStack(spacing: 0) {
-            LeftToolRail()
-                .frame(width: 56)
-            Rectangle()
-                .fill(AppTheme.hairline)
-                .frame(width: 1)
-            VStack(spacing: 0) {
-                TopBar()
-                HStack(spacing: 12) {
-                    QueuePanel()
-                        .frame(width: 292)
-                    PreviewWorkspace()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    ParameterPanel()
-                        .frame(width: 336)
-                }
-                .padding(12)
-                .frame(maxHeight: .infinity)
-                Filmstrip()
-                    .frame(height: 124)
+        VStack(spacing: 0) {
+            TopBar()
+            HStack(spacing: 16) {
+                QueuePanel()
+                    .frame(width: 292)
+                PreviewWorkspace()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ParameterPanel()
+                    .frame(width: 336)
             }
+            .padding(16)
+            .frame(maxHeight: .infinity)
+            Filmstrip()
+                .frame(height: 132)
         }
         .background(AppTheme.background)
         .overlay(DropZoneOverlay())
@@ -99,14 +92,28 @@ final class URLCollector: @unchecked Sendable {
     }
 }
 
-@MainActor
-final class ImagePreviewCache {
+final class ImagePreviewCache: @unchecked Sendable {
     static let shared = ImagePreviewCache()
 
     private let cache = NSCache<NSString, NSImage>()
+    private let loadQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "local.fiona.fff.preview-loader"
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+
+    func key(for url: URL, maxPixelSize: Int) -> String {
+        "\(url.path)#\(maxPixelSize)"
+    }
+
+    func cachedImage(for url: URL, maxPixelSize: Int) -> NSImage? {
+        cache.object(forKey: key(for: url, maxPixelSize: maxPixelSize) as NSString)
+    }
 
     func image(for url: URL, maxPixelSize: Int) -> NSImage? {
-        let key = "\(url.path)#\(maxPixelSize)" as NSString
+        let key = key(for: url, maxPixelSize: maxPixelSize) as NSString
         if let cached = cache.object(forKey: key) {
             return cached
         }
@@ -144,115 +151,110 @@ final class ImagePreviewCache {
         cache.setObject(image, forKey: key)
         return image
     }
+
+    func loadImage(for url: URL, maxPixelSize: Int, completion: @escaping (NSImage?) -> Void) {
+        loadQueue.addOperation { [weak self] in
+            guard let self else { return }
+            let loaded = self.image(for: url, maxPixelSize: maxPixelSize)
+            OperationQueue.main.addOperation {
+                completion(loaded)
+            }
+        }
+    }
+}
+
+struct AsyncCachedImage<Content: View, Placeholder: View>: View {
+    let url: URL
+    let maxPixelSize: Int
+    let content: (NSImage) -> Content
+    let placeholder: () -> Placeholder
+    @State private var image: NSImage?
+    @State private var loadKey = ""
+
+    var body: some View {
+        Group {
+            if let image {
+                content(image)
+            } else {
+                placeholder()
+            }
+        }
+        .onAppear(perform: loadIfNeeded)
+        .onChange(of: url) { _, _ in resetAndLoad() }
+        .onChange(of: maxPixelSize) { _, _ in resetAndLoad() }
+    }
+
+    private func resetAndLoad() {
+        image = nil
+        loadIfNeeded()
+    }
+
+    private func loadIfNeeded() {
+        let key = ImagePreviewCache.shared.key(for: url, maxPixelSize: maxPixelSize)
+        guard image == nil || loadKey != key else { return }
+        loadKey = key
+        if let cached = ImagePreviewCache.shared.cachedImage(for: url, maxPixelSize: maxPixelSize) {
+            image = cached
+            return
+        }
+        let targetKey = key
+        let targetURL = url
+        let targetSize = maxPixelSize
+        ImagePreviewCache.shared.loadImage(for: targetURL, maxPixelSize: targetSize) { loaded in
+            guard loadKey == targetKey else { return }
+            image = loaded
+        }
+    }
 }
 
 struct ScrollWheelCatcher: NSViewRepresentable {
     let onScroll: (Double) -> Void
 
-    func makeNSView(context: Context) -> ScrollWheelView {
-        let view = ScrollWheelView()
+    func makeNSView(context: Context) -> ScrollWheelMonitorView {
+        let view = ScrollWheelMonitorView()
         view.onScroll = onScroll
         return view
     }
 
-    func updateNSView(_ nsView: ScrollWheelView, context: Context) {
+    func updateNSView(_ nsView: ScrollWheelMonitorView, context: Context) {
         nsView.onScroll = onScroll
     }
+
+    static func dismantleNSView(_ nsView: ScrollWheelMonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
 }
 
-final class ScrollWheelView: NSView {
+final class ScrollWheelMonitorView: NSView {
     var onScroll: ((Double) -> Void)?
+    private var monitor: Any?
 
-    override func scrollWheel(with event: NSEvent) {
-        onScroll?(event.scrollingDeltaY)
-    }
-}
-
-struct LeftToolRail: View {
-    @EnvironmentObject private var store: AppStore
-
-    var body: some View {
-        VStack(spacing: 8) {
-            RailLogoMark()
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-
-            ToolRailButton(icon: "tray.and.arrow.down", title: "导入文件") {
-                store.pickFiles()
-            }
-            ToolRailButton(icon: "crop", title: "新增裁切框", tint: AppTheme.selectionBlue) {
-                store.addCropRegionToSelectedPhoto()
-            }
-            .disabled(store.selectedPhoto == nil)
-            ToolRailButton(icon: "wand.and.stars", title: "自动识别", tint: AppTheme.selectionBlue) {
-                store.smartRedetectSelectedPhoto()
-            }
-            .disabled(store.selectedPhoto == nil)
-            ToolRailButton(icon: "rectangle.stack", title: "套用到当前文件夹", tint: AppTheme.green) {
-                store.applyCurrentCropToSelectedFolder()
-            }
-            .disabled(!store.canApplyCurrentCropToFolder)
-
-            Divider()
-                .overlay(AppTheme.hairline)
-                .padding(.vertical, 4)
-                .padding(.horizontal, 12)
-
-            ToolRailButton(icon: "arrow.up.and.down.and.arrow.left.and.right", title: "向左微调", compact: true) {
-                store.nudgeAllCropRegions(dx: -0.001, dy: 0)
-            }
-            .disabled(store.selectedPhoto == nil)
-            ToolRailButton(icon: "rotate.left", title: "左旋 1 度", compact: true, tint: AppTheme.amber) {
-                store.rotateSelectedCropRegion(degrees: -1)
-            }
-            .disabled(store.selectedCropRegionID == nil)
-            ToolRailButton(icon: "rotate.right", title: "右旋 1 度", compact: true, tint: AppTheme.amber) {
-                store.rotateSelectedCropRegion(degrees: 1)
-            }
-            .disabled(store.selectedCropRegionID == nil)
-            ToolRailButton(icon: "trash", title: "只保留选中框", compact: true, tint: AppTheme.red) {
-                store.keepOnlySelectedCropRegion()
-            }
-            .disabled((store.selectedPhoto?.cropRegions.count ?? 0) <= 1)
-
-            Spacer()
-
-            ToolRailButton(icon: "square.and.arrow.up", title: "导出") {
-                store.startProcessing()
-            }
-            .padding(.bottom, 12)
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stopMonitoring()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, self.isPointerInside(event) else { return event }
+            self.onScroll?(event.scrollingDeltaY)
+            return nil
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppTheme.rail)
     }
-}
 
-struct RailLogoMark: View {
-    var body: some View {
-        Image(nsImage: AppIcon.image())
-            .resizable()
-            .scaledToFit()
-            .frame(width: 34, height: 34)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08)))
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
-}
 
-struct ToolRailButton: View {
-    let icon: String
-    let title: String
-    var compact = false
-    var tint: Color = AppTheme.icon
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: compact ? 14 : 16, weight: .semibold))
-                .frame(width: 34, height: compact ? 30 : 34)
+    func stopMonitoring() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
         }
-        .buttonStyle(ToolRailButtonStyle(tint: tint, compact: compact))
-        .help(title)
+    }
+
+    private func isPointerInside(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        return bounds.contains(point)
     }
 }
 
@@ -264,25 +266,27 @@ struct TopBar: View {
             BrandLockup()
             Spacer()
             HStack(spacing: 10) {
-                Button {
-                    store.pickFiles()
-                } label: {
-                    ToolbarActionLabel(icon: "tray.and.arrow.down", title: "导入")
-                }
+                Button("导入文件") { store.pickFiles() }
                     .buttonStyle(TopBarButtonStyle())
                     .help("导入图片文件或包含图片的文件夹")
                 Button { store.startProcessing() } label: {
-                    ToolbarActionLabel(icon: "square.and.arrow.up", title: "导出")
+                    HStack(spacing: 7) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("导出")
+                    }
                 }
                     .buttonStyle(StartProcessButtonStyle())
                     .help("按当前裁切框导出")
             }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 58, alignment: .center)
-        .background(AppTheme.topBar)
+        .padding(.leading, 84)
+        .padding(.trailing, 18)
+        .padding(.top, 17)
+        .frame(height: 72, alignment: .topLeading)
+        .background(Color(red: 0.095, green: 0.105, blue: 0.125).opacity(0.96))
         .overlay(alignment: .bottom) {
-            Rectangle().fill(AppTheme.hairline).frame(height: 1)
+            Rectangle().fill(AppTheme.line).frame(height: 1)
         }
     }
 }
@@ -294,32 +298,18 @@ struct BrandLockup: View {
                 .frame(width: 34, height: 34)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Fiona Spotter")
-                    .font(.system(size: 15, weight: .semibold))
+                Text("FionaFFF")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundStyle(AppTheme.text)
                     .lineLimit(1)
-                Text("批量底片切分与边界微调")
-                    .font(.system(size: 11))
+                Text("film frame spotting and export")
+                    .font(.system(size: 11.5))
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(1)
             }
             .padding(.top, 1)
         }
         .frame(width: 252, height: 38, alignment: .leading)
-    }
-}
-
-struct ToolbarActionLabel: View {
-    let icon: String
-    let title: String
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-        }
     }
 }
 
@@ -342,7 +332,7 @@ struct QueuePanel: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 50)
-            .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.hairline).frame(height: 1) }
+            .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
 
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -401,7 +391,7 @@ struct FolderTaskRow: View {
                         Image(systemName: "folder")
                     }
                     .buttonStyle(IconButtonStyle())
-                    .help(task.status == .done ? "打开输出文件夹" : "打开原始文件夹")
+                    .help("打开当前图片所在文件夹")
                 }
             }
 
@@ -410,11 +400,11 @@ struct FolderTaskRow: View {
                 .controlSize(.small)
         }
         .padding(12)
-        .background(active ? AppTheme.activeSurface : AppTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .background(active ? Color(red: 0.125, green: 0.145, blue: 0.176) : Color(red: 0.115, green: 0.13, blue: 0.155))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(active ? AppTheme.selectionBlue.opacity(0.42) : AppTheme.stroke)
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(active ? AppTheme.blue.opacity(0.32) : Color.white.opacity(0.05))
         }
     }
 }
@@ -449,29 +439,40 @@ struct PreviewWorkspace: View {
         GeometryReader { proxy in
             ZStack {
                 GridBackground()
-                if let photo = store.selectedPhoto, let image = ImagePreviewCache.shared.image(for: photo.url, maxPixelSize: 2400) {
-                    ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                        PhotoCanvas(
-                            image: image,
-                            regions: photo.cropRegions,
-                            selectedRegionID: store.selectedCropRegionID,
-                            onDelete: { regionID in
-                                store.deleteSelectedCrop(regionID: regionID)
-                            },
-                            onSelect: { regionID in
-                                store.selectCropRegion(regionID)
+                if let photo = store.selectedPhoto {
+                    AsyncCachedImage(url: photo.url, maxPixelSize: 2400) { image in
+                        ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                            PhotoCanvas(
+                                image: image,
+                                rotationDegrees: store.previewRotationDegrees,
+                                regions: photo.cropRegions,
+                                selectedRegionID: store.selectedCropRegionID,
+                                onDelete: { regionID in
+                                    store.deleteSelectedCrop(regionID: regionID)
+                                },
+                                onSelect: { regionID in
+                                    store.selectCropRegion(regionID)
+                                }
+                            ) { regionID, rect, angle in
+                                store.updateSelectedCrop(regionID: regionID, rect: rect, angle: angle)
                             }
-                        ) { regionID, rect, angle in
-                            store.updateSelectedCrop(regionID: regionID, rect: rect, angle: angle)
+                            .id(photo.id)
+                            .frame(width: max(proxy.size.width - 136, 1) * store.previewZoom, height: max(proxy.size.height - 164, 1) * store.previewZoom)
+                            .padding(.horizontal, 68)
+                            .padding(.vertical, 82)
                         }
-                        .id(photo.id)
-                        .frame(width: max(proxy.size.width - 136, 1) * store.previewZoom, height: max(proxy.size.height - 164, 1) * store.previewZoom)
-                        .padding(.horizontal, 68)
-                        .padding(.vertical, 82)
+                        .overlay(ScrollWheelCatcher { delta in
+                            store.adjustPreviewZoom(delta: delta)
+                        })
+                    } placeholder: {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("正在加载预览")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(AppTheme.muted)
+                        }
                     }
-                    .background(ScrollWheelCatcher { delta in
-                        store.adjustPreviewZoom(delta: delta)
-                    })
                 } else {
                     VStack(spacing: 12) {
                         Image(systemName: "photo.on.rectangle.angled")
@@ -504,11 +505,11 @@ struct PreviewWorkspace: View {
                     }
                     Spacer()
                     HStack(spacing: 8) {
-                        Button { store.zoomPreviewOut() } label: {
-                            Image(systemName: "minus.magnifyingglass")
+                        Button { store.rotatePreviewImageLeft() } label: {
+                            Image(systemName: "rotate.left")
                         }
                         .buttonStyle(IconButtonStyle())
-                        .help("缩小预览")
+                        .help("左旋预览图 90 度")
 
                         Button { store.resetPreviewZoom() } label: {
                             Image(systemName: "arrow.counterclockwise")
@@ -516,11 +517,11 @@ struct PreviewWorkspace: View {
                         .buttonStyle(IconButtonStyle())
                         .help("重置预览缩放")
 
-                        Button { store.zoomPreviewIn() } label: {
-                            Image(systemName: "plus.magnifyingglass")
+                        Button { store.rotatePreviewImageRight() } label: {
+                            Image(systemName: "rotate.right")
                         }
                         .buttonStyle(IconButtonStyle())
-                        .help("放大预览")
+                        .help("右旋预览图 90 度")
                     }
                     ViewerLog()
                 }
@@ -529,13 +530,14 @@ struct PreviewWorkspace: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .background(AppTheme.viewer)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.stroke))
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.05)))
     }
 }
 
 struct PhotoCanvas: View {
     let image: NSImage
+    let rotationDegrees: Double
     let regions: [CropRegion]
     let selectedRegionID: CropRegion.ID?
     let onDelete: (CropRegion.ID) -> Void
@@ -546,7 +548,10 @@ struct PhotoCanvas: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let imageRect = aspectFitRect(imageSize: image.size, bounds: proxy.size)
+            let rotated = isQuarterTurn(rotationDegrees)
+            let displaySize = rotated ? CGSize(width: image.size.height, height: image.size.width) : image.size
+            let imageRect = aspectFitRect(imageSize: displaySize, bounds: proxy.size)
+            let contentSize = rotated ? CGSize(width: imageRect.height, height: imageRect.width) : imageRect.size
             ZStack(alignment: .topLeading) {
                 Color.clear
                     .contentShape(Rectangle())
@@ -557,18 +562,19 @@ struct PhotoCanvas: View {
                         .resizable()
                         .scaledToFit()
                         .clipped()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .frame(width: contentSize.width, height: contentSize.height)
 
-                    MultiCropOverlay(
+                    CropOverlayView(
                         regions: regions,
                         selectedRegionID: selectedRegionID,
-                        onDelete: onDelete,
                         onSelect: onSelect,
                         onChange: onCropChange
                     )
-                    .frame(width: imageRect.width, height: imageRect.height)
-                    .offset(x: imageRect.minX, y: imageRect.minY)
+                    .frame(width: contentSize.width, height: contentSize.height)
                 }
+                .frame(width: contentSize.width, height: contentSize.height)
+                .rotationEffect(.degrees(rotationDegrees), anchor: .center)
+                .position(x: imageRect.midX, y: imageRect.midY)
                 .offset(panOffset)
             }
         }
@@ -596,6 +602,11 @@ struct PhotoCanvas: View {
         let height = imageSize.height * scale
         return CGRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
     }
+
+    private func isQuarterTurn(_ degrees: Double) -> Bool {
+        let normalized = degrees.truncatingRemainder(dividingBy: 360)
+        return abs(normalized - 90) < 0.001 || abs(normalized - 270) < 0.001 || abs(normalized + 90) < 0.001
+    }
 }
 
 struct MultiCropOverlay: View {
@@ -617,6 +628,155 @@ struct MultiCropOverlay: View {
                 }
             }
         }
+    }
+}
+
+struct CropOverlayView: NSViewRepresentable {
+    let regions: [CropRegion]
+    let selectedRegionID: CropRegion.ID?
+    let onSelect: (CropRegion.ID) -> Void
+    let onChange: (CropRegion.ID, CGRect, Double) -> Void
+
+    func makeNSView(context: Context) -> CropOverlayNSView {
+        let view = CropOverlayNSView()
+        view.onSelect = onSelect
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: CropOverlayNSView, context: Context) {
+        nsView.onSelect = onSelect
+        nsView.onChange = onChange
+        nsView.set(regions: regions, selectedID: selectedRegionID)
+    }
+}
+
+final class CropOverlayNSView: NSView {
+    var onSelect: ((CropRegion.ID) -> Void)?
+    var onChange: ((CropRegion.ID, CGRect, Double) -> Void)?
+
+    private var regions: [CropRegion] = []
+    private var selectedID: CropRegion.ID?
+    private var activeID: CropRegion.ID?
+    private var activeHandle: CropHandle?
+    private var dragStartRect = CGRect.zero
+    private var dragStartPoint = CGPoint.zero
+    private var isDragging = false
+    private let cropRed = NSColor(calibratedRed: 1, green: 0.02, blue: 0, alpha: 1)
+
+    override var isFlipped: Bool { true }
+
+    func set(regions: [CropRegion], selectedID: CropRegion.ID?) {
+        guard !isDragging else { return }
+        self.regions = regions
+        self.selectedID = selectedID
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        cropRed.setStroke()
+        for region in regions {
+            let rect = viewRect(from: region.rect)
+            let path = rotatedRectPath(rect: rect, angle: region.angle)
+            path.lineWidth = region.id == selectedID ? 2 : 1.5
+            path.stroke()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let hit = hitTestCrop(at: point) else { return }
+        selectedID = hit.id
+        activeID = hit.id
+        activeHandle = hit.handle
+        dragStartRect = hit.rect
+        dragStartPoint = point
+        isDragging = true
+        onSelect?(hit.id)
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging,
+              let activeID,
+              let index = regions.firstIndex(where: { $0.id == activeID }) else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let dx = (point.x - dragStartPoint.x) / max(1, bounds.width)
+        let dy = (point.y - dragStartPoint.y) / max(1, bounds.height)
+        var next = dragStartRect
+        if let activeHandle {
+            next = activeHandle.resize(rect: dragStartRect, dx: dx, dy: dy)
+        } else {
+            next.origin.x += dx
+            next.origin.y += dy
+        }
+        regions[index].rect = next.normalizedCropRect
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            activeID = nil
+            activeHandle = nil
+            isDragging = false
+        }
+        guard let selectedID,
+              let region = regions.first(where: { $0.id == selectedID }) else { return }
+        onChange?(selectedID, region.rect.normalizedCropRect, region.angle)
+    }
+
+    private func hitTestCrop(at point: CGPoint) -> (id: CropRegion.ID, handle: CropHandle?, rect: CGRect)? {
+        for region in regions.reversed() {
+            let rect = viewRect(from: region.rect)
+            if let handle = hitHandle(point: point, rect: rect, angle: region.angle) {
+                return (region.id, handle, region.rect)
+            }
+            if rotatedRectPath(rect: rect, angle: region.angle).contains(point) {
+                return (region.id, nil, region.rect)
+            }
+        }
+        return nil
+    }
+
+    private func hitHandle(point: CGPoint, rect: CGRect, angle: Double) -> CropHandle? {
+        for handle in CropHandle.allCases {
+            let center = rotated(point: handle.point(in: rect), around: CGPoint(x: rect.midX, y: rect.midY), angle: angle)
+            let size = handle.hitSize(in: rect)
+            let hitRect = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
+            if hitRect.contains(point) {
+                return handle
+            }
+        }
+        return nil
+    }
+
+    private func viewRect(from normalized: CGRect) -> CGRect {
+        CGRect(
+            x: normalized.minX * bounds.width,
+            y: normalized.minY * bounds.height,
+            width: normalized.width * bounds.width,
+            height: normalized.height * bounds.height
+        )
+    }
+
+    private func rotatedRectPath(rect: CGRect, angle: Double) -> NSBezierPath {
+        var transform = AffineTransform()
+        transform.translate(x: rect.midX, y: rect.midY)
+        transform.rotate(byRadians: angle)
+        transform.translate(x: -rect.midX, y: -rect.midY)
+        let path = NSBezierPath(rect: rect)
+        path.transform(using: transform)
+        return path
+    }
+
+    private func rotated(point: CGPoint, around center: CGPoint, angle: Double) -> CGPoint {
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        return CGPoint(
+            x: center.x + dx * cos(angle) - dy * sin(angle),
+            y: center.y + dx * sin(angle) + dy * cos(angle)
+        )
     }
 }
 
@@ -870,9 +1030,9 @@ struct ParameterPanel: View {
                     Button {
                         store.addCropRegionToSelectedPhoto()
                     } label: {
-                            Image(systemName: "crop")
+                        Image(systemName: "plus.viewfinder")
                     }
-                    .buttonStyle(AccentIconButtonStyle(color: AppTheme.selectionBlue))
+                    .buttonStyle(AccentIconButtonStyle(color: AppTheme.orange))
                     .disabled(store.selectedPhoto == nil)
                     .help("添加一个新的裁切框，可在预览区拖动和调整四角")
 
@@ -888,7 +1048,7 @@ struct ParameterPanel: View {
                     Button {
                         store.applyCurrentCropToSelectedFolder()
                     } label: {
-                        Image(systemName: "rectangle.stack.badge.plus")
+                        Image(systemName: "rectangle.stack")
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.green))
                     .disabled(!store.canApplyCurrentCropToFolder)
@@ -923,22 +1083,22 @@ struct ParameterPanel: View {
                     .disabled(store.selectedPhoto == nil)
                     .help("所有红框向右微调")
 
-                    Button { store.rotateSelectedCropRegion(degrees: -1) } label: {
+                    Button { store.rotateSelectedCropRegion(degrees: -0.5) } label: {
                         Image(systemName: "rotate.left")
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.orange))
                     .disabled(store.selectedCropRegionID == nil)
-                    .help("当前选中红框向左旋转 1 度")
+                    .help("当前选中红框向左旋转 0.5 度")
 
-                    Button { store.rotateSelectedCropRegion(degrees: 1) } label: {
+                    Button { store.rotateSelectedCropRegion(degrees: 0.5) } label: {
                         Image(systemName: "rotate.right")
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.orange))
                     .disabled(store.selectedCropRegionID == nil)
-                    .help("当前选中红框向右旋转 1 度")
+                    .help("当前选中红框向右旋转 0.5 度")
 
                     Button { store.keepOnlySelectedCropRegion() } label: {
-                        Image(systemName: "trash")
+                        Image(systemName: "rectangle.stack.badge.minus")
                     }
                     .buttonStyle(AccentIconButtonStyle(color: AppTheme.red))
                     .disabled((store.selectedPhoto?.cropRegions.count ?? 0) <= 1)
@@ -947,13 +1107,13 @@ struct ParameterPanel: View {
                 Button {
                     store.addCropRegionToSelectedPhoto()
                 } label: {
-                    ParameterActionLabel(icon: "crop", title: "新增裁切框")
+                    ParameterActionLabel(icon: "plus.rectangle.on.rectangle", title: "新增红框")
                 }
                 .buttonStyle(ParameterActionButtonStyle(color: AppTheme.orange))
                 .disabled(store.selectedPhoto == nil)
             }
             .padding(16)
-            .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.hairline).frame(height: 1) }
+            .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.line).frame(height: 1) }
 
             ScrollView {
                 VStack(spacing: 12) {
@@ -987,6 +1147,35 @@ struct ParameterPanel: View {
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                Toggle(isOn: $store.settings.dustRemovalEnabled) {
+                                    HStack(spacing: 7) {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(AppTheme.orange)
+                                        Text("除尘导出")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(AppTheme.text)
+                                    }
+                                }
+                                .toggleStyle(.switch)
+
+                                HStack(spacing: 10) {
+                                    Text("强度")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(AppTheme.muted)
+                                    Slider(value: $store.settings.dustRemovalStrength, in: 0...100)
+                                        .disabled(!store.settings.dustRemovalEnabled)
+                                    Text("\(Int(store.settings.dustRemovalStrength))")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(AppTheme.muted)
+                                        .frame(width: 28, alignment: .trailing)
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.black.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
 
                             HStack(spacing: 8) {
                                 Image(systemName: "folder")
@@ -1187,8 +1376,8 @@ struct Filmstrip: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(AppTheme.bottomBar)
-        .overlay(alignment: .top) { Rectangle().fill(AppTheme.hairline).frame(height: 1) }
+        .background(Color(red: 0.08, green: 0.09, blue: 0.11))
+        .overlay(alignment: .top) { Rectangle().fill(AppTheme.line).frame(height: 1) }
     }
 
     private var selectedPhotoIndex: Int? {
@@ -1213,11 +1402,11 @@ struct FilmFrame: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             ZStack(alignment: .topTrailing) {
-                if let image = ImagePreviewCache.shared.image(for: photo.url, maxPixelSize: 360) {
+                AsyncCachedImage(url: photo.url, maxPixelSize: 360) { image in
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                } else {
+                } placeholder: {
                     Color(red: 0.22, green: 0.18, blue: 0.14)
                 }
                 Circle().fill(statusColor).frame(width: 8, height: 8).padding(5)
@@ -1235,9 +1424,9 @@ struct FilmFrame: View {
         }
         .padding(6)
         .frame(width: 124, height: 78)
-        .background(active ? AppTheme.activeSurface : AppTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? AppTheme.selectionBlue.opacity(0.52) : AppTheme.stroke))
+        .background(Color(red: 0.115, green: 0.13, blue: 0.16))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(active ? AppTheme.blue.opacity(0.45) : Color.white.opacity(0.05)))
     }
 
     private var statusColor: Color {
@@ -1303,8 +1492,8 @@ struct SettingsGroup<Content: View>: View {
         }
         .padding(14)
         .background(Color.white.opacity(0.025))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.stroke))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.05)))
     }
 }
 
@@ -1458,33 +1647,23 @@ struct GridBackground: View {
 }
 
 enum AppTheme {
-    static let text = Color(red: 0.91, green: 0.92, blue: 0.94)
-    static let muted = Color(red: 0.61, green: 0.64, blue: 0.68)
-    static let icon = Color(red: 0.76, green: 0.79, blue: 0.83)
-    static let blue = Color(red: 0.25, green: 0.52, blue: 0.82)
-    static let selectionBlue = Color(red: 0.19, green: 0.66, blue: 1.0)
+    static let text = Color(red: 0.93, green: 0.95, blue: 0.97)
+    static let muted = Color(red: 0.59, green: 0.63, blue: 0.69)
+    static let blue = Color(red: 0.37, green: 0.53, blue: 0.72)
     static let green = Color(red: 0.31, green: 0.65, blue: 0.55)
-    static let amber = Color(red: 0.9, green: 0.55, blue: 0.26)
-    static let orange = amber
+    static let orange = Color(red: 0.9, green: 0.55, blue: 0.26)
     static let red = Color(red: 0.95, green: 0.12, blue: 0.1)
     static let line = Color.white.opacity(0.08)
-    static let hairline = Color.black.opacity(0.55)
-    static let stroke = Color.white.opacity(0.055)
-    static let rail = Color(red: 0.105, green: 0.11, blue: 0.12)
-    static let topBar = Color(red: 0.155, green: 0.163, blue: 0.175)
-    static let bottomBar = Color(red: 0.12, green: 0.127, blue: 0.138)
-    static let surface = Color(red: 0.16, green: 0.17, blue: 0.185)
-    static let activeSurface = Color(red: 0.19, green: 0.205, blue: 0.225)
-    static let background = LinearGradient(colors: [Color(red: 0.17, green: 0.18, blue: 0.195), Color(red: 0.095, green: 0.1, blue: 0.11)], startPoint: .top, endPoint: .bottom)
-    static let viewer = RadialGradient(colors: [Color(red: 0.145, green: 0.155, blue: 0.172), Color(red: 0.085, green: 0.09, blue: 0.1)], center: .top, startRadius: 0, endRadius: 760)
+    static let background = LinearGradient(colors: [Color(red: 0.125, green: 0.14, blue: 0.17), Color(red: 0.055, green: 0.063, blue: 0.075)], startPoint: .top, endPoint: .bottom)
+    static let viewer = RadialGradient(colors: [Color(red: 0.105, green: 0.12, blue: 0.15), Color(red: 0.05, green: 0.055, blue: 0.07)], center: .top, startRadius: 0, endRadius: 760)
 }
 
 struct PanelStyle: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .background(LinearGradient(colors: [Color(red: 0.155, green: 0.165, blue: 0.182), Color(red: 0.125, green: 0.132, blue: 0.145)], startPoint: .top, endPoint: .bottom))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.stroke))
+            .background(LinearGradient(colors: [Color(red: 0.102, green: 0.115, blue: 0.138), Color(red: 0.078, green: 0.087, blue: 0.105)], startPoint: .top, endPoint: .bottom))
+            .clipShape(RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.05)))
     }
 }
 
@@ -1494,32 +1673,14 @@ extension View {
     }
 }
 
-struct ToolRailButtonStyle: ButtonStyle {
-    let tint: Color
-    var compact = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(tint)
-            .background(configuration.isPressed ? Color.white.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(configuration.isPressed ? tint.opacity(0.42) : Color.clear, lineWidth: 1)
-            }
-            .opacity(configuration.isPressed ? 0.78 : 1)
-    }
-}
-
 struct IconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(AppTheme.icon)
+            .foregroundStyle(AppTheme.muted)
             .frame(width: 30, height: 30)
-            .background(configuration.isPressed ? Color.white.opacity(0.11) : Color.white.opacity(0.035))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(AppTheme.stroke))
+            .background(configuration.isPressed ? Color.white.opacity(0.08) : Color.white.opacity(0.025))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -1531,12 +1692,13 @@ struct AccentIconButtonStyle: ButtonStyle {
             .font(.system(size: 14, weight: .bold))
             .foregroundStyle(color)
             .frame(width: 31, height: 31)
-            .background(color.opacity(configuration.isPressed ? 0.2 : 0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .background(color.opacity(configuration.isPressed ? 0.24 : 0.14))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(color.opacity(configuration.isPressed ? 0.58 : 0.3), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(color.opacity(configuration.isPressed ? 0.58 : 0.36), lineWidth: 1)
             }
+            .shadow(color: color.opacity(0.18), radius: 8, y: 3)
             .opacity(configuration.isPressed ? 0.84 : 1)
     }
 }
@@ -1550,9 +1712,9 @@ struct ParameterActionButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .frame(height: 32)
             .background(color.opacity(configuration.isPressed ? 0.18 : 0.075))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 8)
                     .stroke(color.opacity(configuration.isPressed ? 0.46 : 0.22), lineWidth: 1)
             }
             .opacity(configuration.isPressed ? 0.84 : 1)
@@ -1566,11 +1728,11 @@ struct TopBarButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(primary ? AppTheme.text : Color(red: 0.78, green: 0.83, blue: 0.89))
-            .frame(width: 88, height: 32)
-            .background(primary ? AppTheme.selectionBlue.opacity(0.9) : Color.white.opacity(0.045))
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .frame(width: 94, height: 34)
+            .background(primary ? AppTheme.blue : Color.white.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay {
-                RoundedRectangle(cornerRadius: 5)
+                RoundedRectangle(cornerRadius: 10)
                     .stroke(primary ? Color.white.opacity(0.08) : Color.white.opacity(0.06))
             }
             .opacity(configuration.isPressed ? 0.82 : 1)
@@ -1582,14 +1744,14 @@ struct StartProcessButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 13, weight: .bold))
             .foregroundStyle(AppTheme.text)
-            .frame(width: 86, height: 32)
-            .background(AppTheme.selectionBlue.opacity(configuration.isPressed ? 0.74 : 0.92))
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .frame(width: 82, height: 34)
+            .background(AppTheme.green.opacity(configuration.isPressed ? 0.78 : 0.92))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay {
-                RoundedRectangle(cornerRadius: 5)
+                RoundedRectangle(cornerRadius: 10)
                     .stroke(Color.white.opacity(configuration.isPressed ? 0.18 : 0.12))
             }
-            .shadow(color: AppTheme.selectionBlue.opacity(0.18), radius: 8, y: 3)
+            .shadow(color: AppTheme.green.opacity(0.22), radius: 8, y: 3)
             .opacity(configuration.isPressed ? 0.86 : 1)
     }
 }
@@ -1601,10 +1763,10 @@ struct FilmstripNavButtonStyle: ButtonStyle {
             .foregroundStyle(AppTheme.muted)
             .frame(width: 30, height: 78)
             .background(configuration.isPressed ? Color.white.opacity(0.075) : Color.white.opacity(0.025))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 11))
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(AppTheme.stroke)
+                RoundedRectangle(cornerRadius: 11)
+                    .stroke(Color.white.opacity(0.05))
             }
     }
 }

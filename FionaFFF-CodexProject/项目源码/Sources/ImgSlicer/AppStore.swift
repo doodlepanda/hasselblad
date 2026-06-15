@@ -13,9 +13,10 @@ final class AppStore: ObservableObject {
     @Published var lastImportSummary: ImportSummary?
     @Published var isDropTargeted = false
     @Published var logMessage = "导入文件或文件夹后，系统会递归识别图片并建立独立任务。"
-    @Published var logSubMessage = "原图只读，输出写入新的 ImgSlicer_Output 目录。"
+    @Published var logSubMessage = "原图只读，输出写入新的 FionaFFF_Output 目录。"
     @Published var templateCropRect: CGRect?
     @Published var previewZoom: Double = 1.0
+    @Published var previewRotationDegrees: Double = 0
     private var templateImageAspect: Double?
 
     private let scanner = FolderScanner()
@@ -70,7 +71,11 @@ final class AppStore: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.image, .folder]
+        if let fffType = UTType(filenameExtension: "fff") {
+            panel.allowedContentTypes = [.image, .folder, fffType]
+        } else {
+            panel.allowedContentTypes = [.image, .folder]
+        }
         panel.prompt = "导入"
         panel.message = "选择图片文件或包含图片的文件夹"
         if panel.runModal() == .OK {
@@ -109,6 +114,7 @@ final class AppStore: ObservableObject {
         selectedTaskID = prepared.first?.id
         selectedPhotoID = prepared.first?.photos.first?.id
         selectedCropRegionID = prepared.first?.photos.first?.cropRegions.first?.id
+        syncPreviewRotationFromSelection()
         settings.exportDirectory = defaultExportDirectory
         lastImportSummary = ImportSummary(folderCount: totalFolders, subfolderCount: totalSubfolders, imageCount: totalImages)
         logMessage = "已替换为新导入的 \(totalImages) 张图片。"
@@ -166,6 +172,7 @@ final class AppStore: ObservableObject {
         selectedTaskID = tasks.first?.id
         selectedPhotoID = tasks.first?.photos.first?.id
         selectedCropRegionID = nil
+        previewRotationDegrees = 0
         lastImportSummary = nil
         logMessage = "已清空当前图片。"
         logSubMessage = templateCropRect == nil ? "导入新图片后重新框选。" : "第一次红框位置仍保留，导入新图片会直接套用。"
@@ -173,13 +180,25 @@ final class AppStore: ObservableObject {
 
     func openFolder(for taskID: FolderTask.ID) {
         guard let task = tasks.first(where: { $0.id == taskID }) else { return }
-        let folderURL = task.status == .done ? outputFolderURL(for: task) : task.rootURL
+        let photo = selectedTaskID == taskID ? selectedPhoto : task.photos.first
+        guard let photo else { return }
+
+        if FileManager.default.fileExists(atPath: photo.url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([photo.url])
+            logMessage = "已打开当前图片所在文件夹。"
+            logSubMessage = photo.url.deletingLastPathComponent().path
+            return
+        }
+
+        let folderURL = photo.url.deletingLastPathComponent()
         guard FileManager.default.fileExists(atPath: folderURL.path) else {
-            logMessage = task.status == .done ? "未找到输出文件夹。" : "未找到原始文件夹。"
+            logMessage = "未找到当前图片所在文件夹。"
             logSubMessage = folderURL.path
             return
         }
         NSWorkspace.shared.open(folderURL)
+        logMessage = "已打开当前图片所在文件夹。"
+        logSubMessage = folderURL.path
     }
 
     func selectTask(_ taskID: FolderTask.ID) {
@@ -187,6 +206,7 @@ final class AppStore: ObservableObject {
         selectedTaskID = taskID
         selectedPhotoID = tasks.first(where: { $0.id == taskID })?.photos.first?.id
         selectedCropRegionID = nil
+        syncPreviewRotationFromSelection()
         scheduleLocatorAroundSelection()
     }
 
@@ -194,6 +214,7 @@ final class AppStore: ObservableObject {
         saveCurrentPhotoIfNeeded()
         selectedPhotoID = photoID
         selectedCropRegionID = nil
+        syncPreviewRotationFromSelection()
         scheduleLocatorAroundSelection()
     }
 
@@ -205,6 +226,7 @@ final class AppStore: ObservableObject {
         let previousIndex = max(0, indexes.photo - 1)
         selectedPhotoID = photos[previousIndex].id
         selectedCropRegionID = nil
+        syncPreviewRotationFromSelection()
         scheduleLocatorAroundSelection()
     }
 
@@ -216,6 +238,7 @@ final class AppStore: ObservableObject {
         let nextIndex = min(photos.count - 1, indexes.photo + 1)
         selectedPhotoID = photos[nextIndex].id
         selectedCropRegionID = nil
+        syncPreviewRotationFromSelection()
         scheduleLocatorAroundSelection()
     }
 
@@ -224,28 +247,55 @@ final class AppStore: ObservableObject {
     }
 
     func zoomPreviewIn() {
-        previewZoom = min(6, previewZoom * 1.18)
+        previewZoom = min(6, previewZoom * 1.12)
     }
 
     func zoomPreviewOut() {
-        previewZoom = max(0.5, previewZoom / 1.18)
+        previewZoom = max(0.5, previewZoom / 1.12)
     }
 
     func resetPreviewZoom() {
         previewZoom = 1
     }
 
+    func rotatePreviewImageLeft() {
+        updateSelectedPhotoPreviewRotation(normalizedPreviewRotation(previewRotationDegrees - 90))
+    }
+
+    func rotatePreviewImageRight() {
+        updateSelectedPhotoPreviewRotation(normalizedPreviewRotation(previewRotationDegrees + 90))
+    }
+
     func adjustPreviewZoom(delta: Double) {
-        if delta > 0 {
-            zoomPreviewOut()
-        } else if delta < 0 {
-            zoomPreviewIn()
-        }
+        guard delta != 0 else { return }
+        let clamped = min(18, max(-18, delta))
+        let factor = exp(-clamped * 0.012)
+        previewZoom = min(6, max(0.5, previewZoom * factor))
     }
 
     func deleteSelectedCropRegion() {
         guard let selectedCropRegionID else { return }
         deleteSelectedCrop(regionID: selectedCropRegionID)
+    }
+
+    private func normalizedPreviewRotation(_ degrees: Double) -> Double {
+        let value = degrees.truncatingRemainder(dividingBy: 360)
+        return value < 0 ? value + 360 : value
+    }
+
+    private func updateSelectedPhotoPreviewRotation(_ degrees: Double) {
+        previewRotationDegrees = degrees
+        guard let indexes = selectedIndexes() else { return }
+        tasks[indexes.task].photos[indexes.photo].previewRotationDegrees = degrees
+        tasks[indexes.task].photos[indexes.photo].isManual = true
+        tasks[indexes.task].status = .needsReview
+        tasks[indexes.task].detail = "已旋转当前图片预览"
+        logMessage = "已旋转当前图片。"
+        logSubMessage = "导出结果会保持与当前预览方向一致。"
+    }
+
+    private func syncPreviewRotationFromSelection() {
+        previewRotationDegrees = selectedPhoto?.previewRotationDegrees ?? 0
     }
 
     func updateSelectedCrop(regionID: CropRegion.ID, rect: CGRect, angle: Double? = nil, manual: Bool = true) {
@@ -293,7 +343,7 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].photos[indexes.photo].cropRegions[regionIndex].angle += degrees * .pi / 180
         markSelectedPhotoManual(taskIndex: indexes.task, photoIndex: indexes.photo, detail: "已旋转当前红框")
         logMessage = "已旋转当前选中的红框。"
-        logSubMessage = "每次点击旋转 1 度。"
+        logSubMessage = "每次点击旋转 0.5 度。"
     }
 
     func keepOnlySelectedCropRegion() {
@@ -1128,7 +1178,7 @@ final class AppStore: ObservableObject {
     private func outputFolderURL(for task: FolderTask) -> URL {
         task.rootURL
             .deletingLastPathComponent()
-            .appendingPathComponent("\(task.rootURL.lastPathComponent)_ImgSlicer_Output", isDirectory: true)
+            .appendingPathComponent("\(task.rootURL.lastPathComponent)_FionaFFF_Output", isDirectory: true)
     }
 }
 

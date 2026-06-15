@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DISPLAY_NAME="fiona spotter tool"
+APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="ImgSlicer"
 APP_VERSION="0.35.2"
 APP_BUILD="41"
@@ -68,7 +68,7 @@ cp "Sources/ImgSlicer/Resources/AppIconSource.png" "$RESOURCES/AppIconSource.png
 cp "Sources/ImgSlicer/Resources/icon.svg" "$RESOURCES/icon.svg"
 ditto ".build/arm64-apple-macosx/debug/ImgSlicer_ImgSlicer.bundle" "$RESOURCES/ImgSlicer_ImgSlicer.bundle"
 if ! swift scripts/generate-icon.swift "$RESOURCES/AppIcon.icns" "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png"; then
-  FALLBACK_ICON="$DIST_DIR/ImgSlicer.app/Contents/Resources/AppIcon.icns"
+  FALLBACK_ICON="$ROOT_DIR/Sources/ImgSlicer/Resources/AppIcon.icns"
   if [ -f "$FALLBACK_ICON" ]; then
     cp "$FALLBACK_ICON" "$RESOURCES/AppIcon.icns"
   else
@@ -85,11 +85,11 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>
   <string>ImgSlicer</string>
   <key>CFBundleIdentifier</key>
-  <string>local.fiona.spotter.tool</string>
+  <string>local.fiona.fff</string>
   <key>CFBundleName</key>
-  <string>fiona spotter tool</string>
+  <string>FionaFFF</string>
   <key>CFBundleDisplayName</key>
-  <string>fiona spotter tool</string>
+  <string>FionaFFF</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleIconFile</key>
@@ -103,7 +103,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>
-  <string>fiona spotter tool __APP_VERSION__</string>
+  <string>FionaFFF __APP_VERSION__</string>
 </dict>
 </plist>
 PLIST
@@ -117,28 +117,28 @@ codesign --force --deep --sign - "$APP_DIR"
 xattr -cr "$APP_DIR"
 
 cat > "$README_PATH" <<'TXT'
-fiona spotter tool 其他 Mac 打开说明
+FionaFFF 其他 Mac 打开说明
 
-如果双击提示“fiona spotter tool 已损坏，无法打开”，不是文件真的损坏，而是 macOS Gatekeeper 对微信/浏览器收到的未公证应用加了隔离标记。
+如果双击提示“FionaFFF 已损坏，无法打开”，不是文件真的损坏，而是 macOS Gatekeeper 对微信/浏览器收到的未公证应用加了隔离标记。
 
 推荐打开方式：
 
 1. 解压 zip。
 2. 双击“安装.command”。
 3. 如果系统提示不能打开脚本，请右键“安装.command”选择“打开”。
-4. 安装脚本会复制 fiona spotter tool.app 到“应用程序”，重新本机签名，并清除隔离属性。
+4. 安装脚本会复制 FionaFFF.app 到“应用程序”，重新本机签名，并清除隔离属性。
 
 手动方式：
 
-1. 把 fiona spotter tool.app 拖到“应用程序”。
+1. 把 FionaFFF.app 拖到“应用程序”。
 2. 打开“终端”，执行：
 
-   xattr -dr com.apple.quarantine "/Applications/fiona spotter tool.app"
+   xattr -dr com.apple.quarantine "/Applications/FionaFFF.app"
 
 如果仍然打不开，可执行：
 
-   codesign --force --deep --sign - "/Applications/fiona spotter tool.app"
-   xattr -dr com.apple.quarantine "/Applications/fiona spotter tool.app"
+   codesign --force --deep --sign - "/Applications/FionaFFF.app"
+   xattr -dr com.apple.quarantine "/Applications/FionaFFF.app"
 
 说明：
 当前版本是本地测试包，没有 Apple Developer ID 公证签名。正式商用分发需要使用 Apple Developer ID 证书签名并提交 notarization，才能像普通软件一样直接打开。
@@ -188,7 +188,7 @@ cat > "$INSTALLER_PATH" <<'SCRIPT'
 #!/bin/bash
 set -e
 
-APP_NAME="fiona spotter tool.app"
+APP_NAME="FionaFFF.app"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_APP="$SOURCE_DIR/$APP_NAME"
 TARGET_APP="/Applications/$APP_NAME"
@@ -199,7 +199,7 @@ if [ ! -d "$SOURCE_APP" ]; then
   exit 1
 fi
 
-echo "正在安装 fiona spotter tool 到 /Applications..."
+echo "正在安装 FionaFFF 到 /Applications..."
 rm -rf "$TARGET_APP" 2>/dev/null || true
 
 if ! ditto "$SOURCE_APP" "$TARGET_APP" 2>/dev/null; then
@@ -215,7 +215,7 @@ xattr -cr "$TARGET_APP" 2>/dev/null || true
 echo "正在进行本机 ad-hoc 签名..."
 codesign --force --deep --sign - "$TARGET_APP"
 
-echo "正在启动 fiona spotter tool..."
+echo "正在启动 FionaFFF..."
 open "$TARGET_APP"
 
 echo ""

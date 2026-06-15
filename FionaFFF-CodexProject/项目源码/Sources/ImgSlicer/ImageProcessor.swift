@@ -53,7 +53,7 @@ struct ImageProcessor: Sendable {
         let regions = preferredRegions(from: candidates, settings: settings)
         let stem = url.deletingPathExtension().lastPathComponent
         let outputExtension = settings.exportFormat == .tif ? "tif" : "jpg"
-        let outputs = writeCrops(sourceURL: url, regions: regions) { sliceIndex in
+        let outputs = writeCrops(sourceURL: url, regions: regions, settings: settings, rotationDegrees: 0) { sliceIndex in
             outputDirectory.appendingPathComponent("\(stem)_slice_\(String(format: "%02d", sliceIndex)).\(outputExtension)")
         }
         return PhotoProcessResult(photoURL: url, regions: regions, candidates: candidates, outputURLs: outputs, failed: outputs.isEmpty)
@@ -164,6 +164,8 @@ struct ImageProcessor: Sendable {
             for stage in detectionPipeline.stages(for: settings) {
                 let regions: [CropRegion]
                 switch stage {
+                case .lightGaps:
+                    regions = detectNegativeFilmFrames(luminances: baseLuminances(), width: width, height: height, settings: settings)
                 case .projectionSeparators:
                     regions = detectByProjectionSeparators(gray: gray, width: width, height: height, settings: settings)
                 case .filmFrames:
@@ -1097,17 +1099,17 @@ struct ImageProcessor: Sendable {
     }
 
     private func writeCrops(photo: PhotoItem, task: FolderTask, regions: [CropRegion], settings: CropSettings) -> [URL] {
-        let outputDirectory = settings.exportDirectory ?? task.rootURL
+        let outputDirectory = settings.exportDirectory ?? photo.url.deletingLastPathComponent()
         let outputExtension = settings.exportFormat == .tif ? "tif" : "jpg"
         var nextIndex = nextSequentialOutputIndex(in: outputDirectory, extension: outputExtension)
-        return writeCrops(sourceURL: photo.url, regions: regions) { _ in
+        return writeCrops(sourceURL: photo.url, regions: regions, settings: settings, rotationDegrees: photo.previewRotationDegrees) { _ in
             defer { nextIndex += 1 }
             return outputDirectory.appendingPathComponent("\(String(format: "%02d", nextIndex)).\(outputExtension)")
         }
     }
 
-    private func writeCrops(sourceURL: URL, regions: [CropRegion], outputURLForSlice: (Int) -> URL) -> [URL] {
-        if let fffOutputs = writeFFFCrops(sourceURL: sourceURL, regions: regions, outputURLForSlice: outputURLForSlice) {
+    private func writeCrops(sourceURL: URL, regions: [CropRegion], settings: CropSettings, rotationDegrees: Double, outputURLForSlice: (Int) -> URL) -> [URL] {
+        if let fffOutputs = writeFFFCrops(sourceURL: sourceURL, regions: regions, settings: settings, rotationDegrees: rotationDegrees, outputURLForSlice: outputURLForSlice) {
             return fffOutputs
         }
 
@@ -1121,7 +1123,7 @@ struct ImageProcessor: Sendable {
         var outputs: [URL] = []
         let sourceProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
         for (offset, region) in regions.enumerated() {
-            let crop = sourceCropRect(for: region.rect, imageWidth: cgImage.width, imageHeight: cgImage.height)
+            let crop = sourceCropRect(for: exportRect(for: region), imageWidth: cgImage.width, imageHeight: cgImage.height)
             let pixelRect = CGRect(
                 x: crop.minX * Double(cgImage.width),
                 y: crop.minY * Double(cgImage.height),
@@ -1130,12 +1132,14 @@ struct ImageProcessor: Sendable {
             ).integral
 
             guard let cropped = cgImage.cropping(to: pixelRect) else { continue }
+            let rotated = rotatedImage(cropped, degrees: rotationDegrees) ?? cropped
+            let outputImage = dustCleanedImage(rotated, settings: settings) ?? rotated
             let outputURL = outputURLForSlice(offset + 1)
             do {
                 try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let didWrite = outputURL.pathExtension.lowercased() == "tif"
-                    ? writeTIFFCrop(cropped, to: outputURL, sourceProperties: sourceProperties)
-                    : writeJPEGCrop(cropped, to: outputURL)
+                    ? writeTIFFCrop(outputImage, to: outputURL, sourceProperties: sourceProperties)
+                    : writeJPEGCrop(outputImage, to: outputURL)
                 if didWrite {
                     outputs.append(outputURL)
                 }
@@ -1146,19 +1150,21 @@ struct ImageProcessor: Sendable {
         return outputs
     }
 
-    private func writeFFFCrops(sourceURL: URL, regions: [CropRegion], outputURLForSlice: (Int) -> URL) -> [URL]? {
+    private func writeFFFCrops(sourceURL: URL, regions: [CropRegion], settings: CropSettings, rotationDegrees: Double, outputURLForSlice: (Int) -> URL) -> [URL]? {
         guard let decoder = HasselbladFFFDecoder(url: sourceURL) else { return nil }
 
         var outputs: [URL] = []
         for (offset, region) in regions.enumerated() {
-            let crop = sourceCropRect(for: region.rect, imageWidth: decoder.info.width, imageHeight: decoder.info.height)
+            let crop = sourceCropRect(for: exportRect(for: region), imageWidth: decoder.info.width, imageHeight: decoder.info.height)
             guard let cropped = decoder.makeCropCGImage(rect: crop) else { continue }
+            let rotated = rotatedImage(cropped, degrees: rotationDegrees) ?? cropped
+            let outputImage = dustCleanedImage(rotated, settings: settings) ?? rotated
             let outputURL = outputURLForSlice(offset + 1)
             do {
                 try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let didWrite = outputURL.pathExtension.lowercased() == "tif"
-                    ? writeTIFFCrop(cropped, to: outputURL, sourceProperties: nil)
-                    : writeJPEGCrop(cropped, to: outputURL)
+                    ? writeTIFFCrop(outputImage, to: outputURL, sourceProperties: nil)
+                    : writeJPEGCrop(outputImage, to: outputURL)
                 if didWrite {
                     outputs.append(outputURL)
                 }
@@ -1170,23 +1176,31 @@ struct ImageProcessor: Sendable {
     }
 
     private func sourceCropRect(for rect: CGRect, imageWidth: Int, imageHeight: Int) -> CGRect {
-        let crop = rect.normalized
-        let sourceAspect = Double(imageHeight) / max(Double(imageWidth), 1)
-        let cropAspect = crop.height / max(crop.width, 0.0001)
+        rect.normalized
+    }
 
-        if sourceAspect > 2.5,
-           cropAspect > 2.5,
-           crop.width < 0.35,
-           crop.height > 0.55 {
-            return CGRect(
-                x: 1 - crop.maxY,
-                y: crop.minX,
-                width: crop.height,
-                height: crop.width
-            ).normalized
+    private func exportRect(for region: CropRegion) -> CGRect {
+        guard abs(region.angle) > 0.0001 else { return region.rect.normalized }
+        let rect = region.rect.normalized
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let corners = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY)
+        ].map { point -> CGPoint in
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            return CGPoint(
+                x: center.x + dx * cos(region.angle) - dy * sin(region.angle),
+                y: center.y + dx * sin(region.angle) + dy * cos(region.angle)
+            )
         }
-
-        return crop
+        let minX = corners.map(\.x).min() ?? rect.minX
+        let maxX = corners.map(\.x).max() ?? rect.maxX
+        let minY = corners.map(\.y).min() ?? rect.minY
+        let maxY = corners.map(\.y).max() ?? rect.maxY
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).normalized
     }
 
     private func nextSequentialOutputIndex(in directory: URL, extension outputExtension: String) -> Int {
@@ -1196,6 +1210,524 @@ struct ImageProcessor: Sendable {
             return Int(url.deletingPathExtension().lastPathComponent)
         }
         return (existing.max() ?? 0) + 1
+    }
+
+    private func rotatedImage(_ image: CGImage, degrees: Double) -> CGImage? {
+        let normalized = Int(round(degrees)).positiveModulo(360)
+        guard normalized != 0 else { return image }
+        guard normalized == 90 || normalized == 180 || normalized == 270 else { return image }
+
+        let outputWidth = normalized == 180 ? image.width : image.height
+        let outputHeight = normalized == 180 ? image.height : image.width
+        let colorSpace = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = image.bitmapInfo
+        guard let context = CGContext(
+            data: nil,
+            width: outputWidth,
+            height: outputHeight,
+            bitsPerComponent: image.bitsPerComponent,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .high
+        switch normalized {
+        case 90:
+            context.translateBy(x: CGFloat(outputWidth), y: 0)
+            context.rotate(by: .pi / 2)
+        case 180:
+            context.translateBy(x: CGFloat(outputWidth), y: CGFloat(outputHeight))
+            context.rotate(by: .pi)
+        case 270:
+            context.translateBy(x: 0, y: CGFloat(outputHeight))
+            context.rotate(by: -.pi / 2)
+        default:
+            break
+        }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
+    }
+
+    private func dustCleanedImage(_ image: CGImage, settings: CropSettings) -> CGImage? {
+        guard settings.dustRemovalEnabled, settings.dustRemovalStrength > 0 else { return image }
+        if image.bitsPerComponent == 16, image.bitsPerPixel >= 48 {
+            return dustCleaned16BitRGBImage(image, settings: settings)
+        }
+        return dustCleaned8BitImage(image, settings: settings)
+    }
+
+    private func dustCleaned8BitImage(_ image: CGImage, settings: CropSettings) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        guard width > 8, height > 8 else { return image }
+
+        let pixelCount = width * height
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: pixelCount * bytesPerPixel)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                  ) else {
+                return false
+            }
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else {
+            dustDebug("8bit draw failed")
+            return nil
+        }
+
+        let strength = max(0, min(100, settings.dustRemovalStrength))
+        let brightFloor = UInt8(max(72, 160 - strength * 0.60))
+        let contrastThreshold = Int(max(7, 34 - strength * 0.24))
+        let maxSpotArea = Int(max(4, 10 + strength * 0.82))
+        let maxLineLength = Int(max(48, 90 + strength * 6.2))
+        let slenderLimit = Int(max(2, 2 + strength / 24))
+        let repairRadius = strength >= 85 ? 3 : 2
+
+        var luma = [UInt8](repeating: 0, count: pixelCount)
+        for index in 0..<pixelCount {
+            let offset = index * bytesPerPixel
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            let blue = Int(pixels[offset + 2])
+            luma[index] = UInt8(min(255, (54 * red + 183 * green + 19 * blue) >> 8))
+        }
+        let integral = integralImage(values: luma.map(UInt32.init), width: width, height: height)
+
+        var candidates = [Bool](repeating: false, count: pixelCount)
+        if width > 2, height > 2 {
+            for y in 1..<(height - 1) {
+                let row = y * width
+                for x in 1..<(width - 1) {
+                    let index = row + x
+                    let value = Int(luma[index])
+                    guard value >= Int(brightFloor) else { continue }
+                    let background = localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)
+                    if value - Int(background) >= contrastThreshold {
+                        candidates[index] = true
+                    }
+                }
+            }
+        }
+
+        var mask = filteredDustMask(candidates: candidates, width: width, height: height, maxSpotArea: maxSpotArea, maxLineLength: maxLineLength, slenderLimit: slenderLimit)
+        if strength >= 82 {
+            mask = dilatedDustMask(mask, width: width, height: height)
+        }
+
+        dustDebug("8bit dust candidates=\(candidates.filter { $0 }.count) mask=\(mask.filter { $0 }.count) size=\(width)x\(height)")
+        guard mask.contains(true) else { return image }
+        repairDustPixels(pixels: &pixels, mask: mask, width: width, height: height, radius: repairRadius)
+
+        return pixels.withUnsafeMutableBytes { buffer -> CGImage? in
+            guard let base = buffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                  ) else {
+                return nil
+            }
+            return context.makeImage()
+        }
+    }
+
+    private func dustCleaned16BitRGBImage(_ image: CGImage, settings: CropSettings) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        guard width > 8, height > 8 else { return image }
+
+        let pixelCount = width * height
+        let bytesPerPixel = 6
+        let bytesPerRow = width * bytesPerPixel
+        let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard var pixels = compact16BitRGBPixels(from: image) else {
+            dustDebug("16bit pixel read failed bitsPerComponent=\(image.bitsPerComponent) bitsPerPixel=\(image.bitsPerPixel) bytesPerRow=\(image.bytesPerRow) bitmapInfo=\(image.bitmapInfo.rawValue)")
+            return nil
+        }
+        let littleEndian = image.bitmapInfo.rawValue & CGBitmapInfo.byteOrder16Little.rawValue != 0
+        let bitmapInfo = CGBitmapInfo(rawValue: (littleEndian ? CGBitmapInfo.byteOrder16Little.rawValue : CGBitmapInfo.byteOrder16Big.rawValue) | CGImageAlphaInfo.none.rawValue)
+
+        let strength = max(0, min(100, settings.dustRemovalStrength))
+        let brightFloor = UInt16(max(72, 160 - strength * 0.60) * 257)
+        let contrastThreshold = UInt16(max(7, 34 - strength * 0.24) * 257)
+        let maxSpotArea = Int(max(4, 10 + strength * 0.82))
+        let maxLineLength = Int(max(48, 90 + strength * 6.2))
+        let slenderLimit = Int(max(2, 2 + strength / 24))
+        let repairRadius = strength >= 85 ? 3 : 2
+
+        var luma = [UInt16](repeating: 0, count: pixelCount)
+        for index in 0..<pixelCount {
+            let offset = index * bytesPerPixel
+            let red = Int(readUInt16(pixels, offset: offset, littleEndian: littleEndian))
+            let green = Int(readUInt16(pixels, offset: offset + 2, littleEndian: littleEndian))
+            let blue = Int(readUInt16(pixels, offset: offset + 4, littleEndian: littleEndian))
+            luma[index] = UInt16(min(65535, (54 * red + 183 * green + 19 * blue) >> 8))
+        }
+        let integral = integralImage(values: luma.map(UInt32.init), width: width, height: height)
+
+        var candidates = [Bool](repeating: false, count: pixelCount)
+        if width > 2, height > 2 {
+            for y in 1..<(height - 1) {
+                let row = y * width
+                for x in 1..<(width - 1) {
+                    let index = row + x
+                    let value = luma[index]
+                    guard value >= brightFloor else { continue }
+                    let background = UInt16(min(65535, localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)))
+                    if value > background, value - background >= contrastThreshold {
+                        candidates[index] = true
+                    }
+                }
+            }
+        }
+
+        var mask = filteredDustMask(candidates: candidates, width: width, height: height, maxSpotArea: maxSpotArea, maxLineLength: maxLineLength, slenderLimit: slenderLimit)
+        if strength >= 82 {
+            mask = dilatedDustMask(mask, width: width, height: height)
+        }
+
+        dustDebug("16bit dust candidates=\(candidates.filter { $0 }.count) mask=\(mask.filter { $0 }.count) size=\(width)x\(height)")
+        guard mask.contains(true) else { return image }
+        repair16BitDustPixels(pixels: &pixels, mask: mask, width: width, height: height, radius: repairRadius, littleEndian: littleEndian)
+
+        let data = Data(pixels)
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 16,
+            bitsPerPixel: 48,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    private func compact16BitRGBPixels(from image: CGImage) -> [UInt8]? {
+        guard image.bitsPerComponent == 16,
+              image.bitsPerPixel >= 48,
+              let data = image.dataProvider?.data else {
+            return nil
+        }
+        let width = image.width
+        let height = image.height
+        let sourceBytesPerRow = image.bytesPerRow
+        let compactBytesPerRow = width * 6
+        let sourceData = data as Data
+        let sourceLength = sourceData.count
+        guard sourceBytesPerRow >= compactBytesPerRow,
+              sourceLength >= sourceBytesPerRow * height else {
+            return nil
+        }
+
+        var pixels = [UInt8](repeating: 0, count: compactBytesPerRow * height)
+        sourceData.withUnsafeBytes { sourceRaw in
+            guard let source = sourceRaw.bindMemory(to: UInt8.self).baseAddress else { return }
+            pixels.withUnsafeMutableBytes { destinationRaw in
+                guard let destination = destinationRaw.bindMemory(to: UInt8.self).baseAddress else { return }
+                for y in 0..<height {
+                    destination.advanced(by: y * compactBytesPerRow).update(
+                        from: source.advanced(by: y * sourceBytesPerRow),
+                        count: compactBytesPerRow
+                    )
+                }
+            }
+        }
+        return pixels
+    }
+
+    private func filteredDustMask(candidates: [Bool], width: Int, height: Int, maxSpotArea: Int, maxLineLength: Int, slenderLimit: Int) -> [Bool] {
+        var visited = [Bool](repeating: false, count: candidates.count)
+        var mask = [Bool](repeating: false, count: candidates.count)
+        var queue: [Int] = []
+        var component: [Int] = []
+
+        for start in candidates.indices where candidates[start] && !visited[start] {
+            queue.removeAll(keepingCapacity: true)
+            component.removeAll(keepingCapacity: true)
+            queue.append(start)
+            visited[start] = true
+            var head = 0
+            var minX = start % width
+            var maxX = minX
+            var minY = start / width
+            var maxY = minY
+
+            while head < queue.count {
+                let index = queue[head]
+                head += 1
+                component.append(index)
+                let x = index % width
+                let y = index / width
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+
+                for yy in max(0, y - 1)...min(height - 1, y + 1) {
+                    for xx in max(0, x - 1)...min(width - 1, x + 1) {
+                        let next = yy * width + xx
+                        if candidates[next], !visited[next] {
+                            visited[next] = true
+                            queue.append(next)
+                        }
+                    }
+                }
+            }
+
+            let componentWidth = maxX - minX + 1
+            let componentHeight = maxY - minY + 1
+            let longest = max(componentWidth, componentHeight)
+            let shortest = min(componentWidth, componentHeight)
+            let isSmallSpot = component.count <= maxSpotArea
+            let linePixelLimit = maxSpotArea * 3 + longest * max(2, slenderLimit + 1)
+            let isFineScratch = shortest <= slenderLimit && longest <= maxLineLength && component.count <= linePixelLimit
+            guard isSmallSpot || isFineScratch else { continue }
+            for index in component {
+                mask[index] = true
+            }
+        }
+        return mask
+    }
+
+    private func integralImage(values: [UInt32], width: Int, height: Int) -> [UInt64] {
+        var integral = [UInt64](repeating: 0, count: (width + 1) * (height + 1))
+        for y in 0..<height {
+            var rowSum: UInt64 = 0
+            for x in 0..<width {
+                rowSum += UInt64(values[y * width + x])
+                let index = (y + 1) * (width + 1) + x + 1
+                integral[index] = integral[y * (width + 1) + x + 1] + rowSum
+            }
+        }
+        return integral
+    }
+
+    private func localRingAverage(integral: [UInt64], width: Int, height: Int, x: Int, y: Int, outerRadius: Int, innerRadius: Int) -> UInt32 {
+        let outerLeft = max(0, x - outerRadius)
+        let outerTop = max(0, y - outerRadius)
+        let outerRight = min(width, x + outerRadius + 1)
+        let outerBottom = min(height, y + outerRadius + 1)
+        let innerLeft = max(0, x - innerRadius)
+        let innerTop = max(0, y - innerRadius)
+        let innerRight = min(width, x + innerRadius + 1)
+        let innerBottom = min(height, y + innerRadius + 1)
+
+        let outerSum = rectSum(integral: integral, stride: width + 1, left: outerLeft, top: outerTop, right: outerRight, bottom: outerBottom)
+        let innerSum = rectSum(integral: integral, stride: width + 1, left: innerLeft, top: innerTop, right: innerRight, bottom: innerBottom)
+        let outerArea = UInt64((outerRight - outerLeft) * (outerBottom - outerTop))
+        let innerArea = UInt64((innerRight - innerLeft) * (innerBottom - innerTop))
+        let area = max(1, outerArea - innerArea)
+        return UInt32((outerSum - innerSum) / area)
+    }
+
+    private func rectSum(integral: [UInt64], stride: Int, left: Int, top: Int, right: Int, bottom: Int) -> UInt64 {
+        let bottomRight = integral[bottom * stride + right]
+        let topLeft = integral[top * stride + left]
+        let topRight = integral[top * stride + right]
+        let bottomLeft = integral[bottom * stride + left]
+        return bottomRight + topLeft - topRight - bottomLeft
+    }
+
+    private func dilatedDustMask(_ mask: [Bool], width: Int, height: Int) -> [Bool] {
+        var result = mask
+        for index in mask.indices where mask[index] {
+            let x = index % width
+            let y = index / width
+            for yy in max(0, y - 1)...min(height - 1, y + 1) {
+                for xx in max(0, x - 1)...min(width - 1, x + 1) {
+                    result[yy * width + xx] = true
+                }
+            }
+        }
+        return result
+    }
+
+    private func repairDustPixels(pixels: inout [UInt8], mask: [Bool], width: Int, height: Int, radius: Int) {
+        let source = pixels
+        let bytesPerPixel = 4
+        for index in mask.indices where mask[index] {
+            let x = index % width
+            let y = index / width
+            var redSum = 0
+            var greenSum = 0
+            var blueSum = 0
+            var sampleCount = 0
+
+            for yy in max(0, y - radius)...min(height - 1, y + radius) {
+                for xx in max(0, x - radius)...min(width - 1, x + radius) {
+                    let sampleIndex = yy * width + xx
+                    guard !mask[sampleIndex] else { continue }
+                    let offset = sampleIndex * bytesPerPixel
+                    redSum += Int(source[offset])
+                    greenSum += Int(source[offset + 1])
+                    blueSum += Int(source[offset + 2])
+                    sampleCount += 1
+                }
+            }
+
+            guard sampleCount > 0 else { continue }
+            let offset = index * bytesPerPixel
+            if let directional = directionalRGB8Repair(source: source, mask: mask, width: width, height: height, x: x, y: y, radius: radius + 1) {
+                pixels[offset] = directional.0
+                pixels[offset + 1] = directional.1
+                pixels[offset + 2] = directional.2
+            } else {
+                pixels[offset] = UInt8(redSum / sampleCount)
+                pixels[offset + 1] = UInt8(greenSum / sampleCount)
+                pixels[offset + 2] = UInt8(blueSum / sampleCount)
+            }
+        }
+    }
+
+    private func repair16BitDustPixels(pixels: inout [UInt8], mask: [Bool], width: Int, height: Int, radius: Int, littleEndian: Bool) {
+        let source = pixels
+        let bytesPerPixel = 6
+        for index in mask.indices where mask[index] {
+            let x = index % width
+            let y = index / width
+            var redSum = 0
+            var greenSum = 0
+            var blueSum = 0
+            var sampleCount = 0
+
+            for yy in max(0, y - radius)...min(height - 1, y + radius) {
+                for xx in max(0, x - radius)...min(width - 1, x + radius) {
+                    let sampleIndex = yy * width + xx
+                    guard !mask[sampleIndex] else { continue }
+                    let offset = sampleIndex * bytesPerPixel
+                    redSum += Int(readUInt16(source, offset: offset, littleEndian: littleEndian))
+                    greenSum += Int(readUInt16(source, offset: offset + 2, littleEndian: littleEndian))
+                    blueSum += Int(readUInt16(source, offset: offset + 4, littleEndian: littleEndian))
+                    sampleCount += 1
+                }
+            }
+
+            guard sampleCount > 0 else { continue }
+            let offset = index * bytesPerPixel
+            if let directional = directionalRGB16Repair(source: source, mask: mask, width: width, height: height, x: x, y: y, radius: radius + 1, littleEndian: littleEndian) {
+                writeUInt16(directional.0, to: &pixels, offset: offset, littleEndian: littleEndian)
+                writeUInt16(directional.1, to: &pixels, offset: offset + 2, littleEndian: littleEndian)
+                writeUInt16(directional.2, to: &pixels, offset: offset + 4, littleEndian: littleEndian)
+            } else {
+                writeUInt16(UInt16(redSum / sampleCount), to: &pixels, offset: offset, littleEndian: littleEndian)
+                writeUInt16(UInt16(greenSum / sampleCount), to: &pixels, offset: offset + 2, littleEndian: littleEndian)
+                writeUInt16(UInt16(blueSum / sampleCount), to: &pixels, offset: offset + 4, littleEndian: littleEndian)
+            }
+        }
+    }
+
+    private func directionalRGB8Repair(source: [UInt8], mask: [Bool], width: Int, height: Int, x: Int, y: Int, radius: Int) -> (UInt8, UInt8, UInt8)? {
+        let directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        var best: (score: Int, red: Int, green: Int, blue: Int)?
+        for direction in directions {
+            guard let negative = nearestRGB8Sample(source: source, mask: mask, width: width, height: height, x: x, y: y, dx: -direction.0, dy: -direction.1, radius: radius),
+                  let positive = nearestRGB8Sample(source: source, mask: mask, width: width, height: height, x: x, y: y, dx: direction.0, dy: direction.1, radius: radius) else {
+                continue
+            }
+            let score = abs(negative.red - positive.red) + abs(negative.green - positive.green) + abs(negative.blue - positive.blue)
+            let candidate = (score: score, red: (negative.red + positive.red) / 2, green: (negative.green + positive.green) / 2, blue: (negative.blue + positive.blue) / 2)
+            if best == nil || candidate.score < best!.score {
+                best = candidate
+            }
+        }
+        guard let best else { return nil }
+        return (UInt8(best.red), UInt8(best.green), UInt8(best.blue))
+    }
+
+    private func nearestRGB8Sample(source: [UInt8], mask: [Bool], width: Int, height: Int, x: Int, y: Int, dx: Int, dy: Int, radius: Int) -> (red: Int, green: Int, blue: Int)? {
+        for step in 1...max(1, radius) {
+            let xx = x + dx * step
+            let yy = y + dy * step
+            guard xx >= 0, xx < width, yy >= 0, yy < height else { break }
+            let index = yy * width + xx
+            guard !mask[index] else { continue }
+            let offset = index * 4
+            return (Int(source[offset]), Int(source[offset + 1]), Int(source[offset + 2]))
+        }
+        return nil
+    }
+
+    private func directionalRGB16Repair(source: [UInt8], mask: [Bool], width: Int, height: Int, x: Int, y: Int, radius: Int, littleEndian: Bool) -> (UInt16, UInt16, UInt16)? {
+        let directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        var best: (score: Int, red: Int, green: Int, blue: Int)?
+        for direction in directions {
+            guard let negative = nearestRGB16Sample(source: source, mask: mask, width: width, height: height, x: x, y: y, dx: -direction.0, dy: -direction.1, radius: radius, littleEndian: littleEndian),
+                  let positive = nearestRGB16Sample(source: source, mask: mask, width: width, height: height, x: x, y: y, dx: direction.0, dy: direction.1, radius: radius, littleEndian: littleEndian) else {
+                continue
+            }
+            let score = abs(negative.red - positive.red) + abs(negative.green - positive.green) + abs(negative.blue - positive.blue)
+            let candidate = (score: score, red: (negative.red + positive.red) / 2, green: (negative.green + positive.green) / 2, blue: (negative.blue + positive.blue) / 2)
+            if best == nil || candidate.score < best!.score {
+                best = candidate
+            }
+        }
+        guard let best else { return nil }
+        return (UInt16(best.red), UInt16(best.green), UInt16(best.blue))
+    }
+
+    private func nearestRGB16Sample(source: [UInt8], mask: [Bool], width: Int, height: Int, x: Int, y: Int, dx: Int, dy: Int, radius: Int, littleEndian: Bool) -> (red: Int, green: Int, blue: Int)? {
+        for step in 1...max(1, radius) {
+            let xx = x + dx * step
+            let yy = y + dy * step
+            guard xx >= 0, xx < width, yy >= 0, yy < height else { break }
+            let index = yy * width + xx
+            guard !mask[index] else { continue }
+            let offset = index * 6
+            return (
+                Int(readUInt16(source, offset: offset, littleEndian: littleEndian)),
+                Int(readUInt16(source, offset: offset + 2, littleEndian: littleEndian)),
+                Int(readUInt16(source, offset: offset + 4, littleEndian: littleEndian))
+            )
+        }
+        return nil
+    }
+
+    private func readUInt16(_ bytes: [UInt8], offset: Int, littleEndian: Bool) -> UInt16 {
+        if littleEndian {
+            return UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+        }
+        return (UInt16(bytes[offset]) << 8) | UInt16(bytes[offset + 1])
+    }
+
+    private func writeUInt16(_ value: UInt16, to bytes: inout [UInt8], offset: Int, littleEndian: Bool) {
+        if littleEndian {
+            bytes[offset] = UInt8(value & 0xff)
+            bytes[offset + 1] = UInt8((value >> 8) & 0xff)
+        } else {
+            bytes[offset] = UInt8((value >> 8) & 0xff)
+            bytes[offset + 1] = UInt8(value & 0xff)
+        }
+    }
+
+    private func dustDebug(_ message: String) {
+        guard ProcessInfo.processInfo.environment["FIONA_DUST_DEBUG"] == "1" else { return }
+        fputs("[dust] \(message)\n", stderr)
     }
 
     private func writeTIFFCrop(_ image: CGImage, to url: URL, sourceProperties: [CFString: Any]?) -> Bool {
@@ -2087,6 +2619,216 @@ struct ImageProcessor: Sendable {
 
     private func center(of segment: IntSegment) -> Int {
         (segment.start + segment.end) / 2
+    }
+
+    private func detectNegativeFilmFrames(luminances: [Double], width: Int, height: Int, settings: CropSettings) -> [CropRegion] {
+        guard width > 80, height > 120, luminances.count >= width * height else { return [] }
+
+        var columnActivity = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var filmLike = 0
+            var black = 0
+            for y in 0..<height {
+                let value = luminances[y * width + x]
+                if value > 0.10 && value < 0.92 { filmLike += 1 }
+                if value <= 0.07 { black += 1 }
+            }
+            columnActivity[x] = max(0, Double(filmLike) / Double(height) - Double(black) / Double(height) * 0.65)
+        }
+
+        let smoothedColumns = movingAverage(columnActivity, window: max(3, width / 160))
+        let columnThreshold = max(0.08, min(0.34, median(smoothedColumns) + standardDeviation(smoothedColumns) * 0.36))
+        let rawColumns = thresholdSegments(
+            values: smoothedColumns,
+            threshold: columnThreshold,
+            minimumSize: max(16, width / 18),
+            lessThan: false
+        )
+        let columns = mergeCloseSegments(rawColumns, maxGap: max(3, width / 90))
+            .compactMap { trimActiveColumn($0, activity: smoothedColumns, width: width) }
+            .filter { segment in
+                let ratio = Double(segment.size) / Double(width)
+                return ratio >= 0.06 && ratio <= 0.62
+            }
+
+        let usableColumns = columns.isEmpty ? [IntSegment(start: 0, end: width)] : columns
+        var rects: [CGRect] = []
+        for column in usableColumns {
+            rects.append(contentsOf: negativeFilmFrames(in: column, luminances: luminances, width: width, height: height, settings: settings))
+        }
+
+        let filtered = mergeNormalizedRects(rects, overlapThreshold: 0.45).filter { rect in
+            let aspect = rect.width / max(rect.height, 0.001)
+            return rect.area > 0.006
+                && rect.width > 0.045
+                && rect.height > 0.055
+                && aspect >= 0.28
+                && aspect <= 2.2
+                && !(rect.width > 0.92 && rect.height > 0.92)
+        }
+        guard filtered.count > 1 else { return [] }
+        return indexedRegions(from: filtered, settings: settings)
+    }
+
+    private func trimActiveColumn(_ segment: IntSegment, activity: [Double], width: Int) -> IntSegment? {
+        guard !activity.isEmpty else { return segment }
+        var start = max(0, min(width - 1, segment.start))
+        var end = max(start + 1, min(width, segment.end))
+        let local = Array(activity[start..<end])
+        let threshold = max(0.045, median(local) * 0.55)
+        let maxInset = max(2, (end - start) / 5)
+
+        while start + 1 < end, start - segment.start < maxInset, activity[start] < threshold {
+            start += 1
+        }
+        while start + 1 < end, segment.end - end < maxInset, activity[end - 1] < threshold {
+            end -= 1
+        }
+        return end - start >= max(12, width / 24) ? IntSegment(start: start, end: end) : nil
+    }
+
+    private func negativeFilmFrames(in column: IntSegment, luminances: [Double], width: Int, height: Int, settings: CropSettings) -> [CGRect] {
+        let xStart = max(0, min(width - 1, column.start))
+        let xEnd = max(xStart + 1, min(width, column.end))
+        let columnWidth = xEnd - xStart
+        guard columnWidth > 8 else { return [] }
+
+        var rowActivity = [Double](repeating: 0, count: height)
+        var rowLight = [Double](repeating: 0, count: height)
+        var rowTexture = [Double](repeating: 0, count: height)
+
+        for y in 0..<height {
+            var active = 0
+            var light = 0
+            var edge = 0.0
+            for x in xStart..<xEnd {
+                let value = luminances[y * width + x]
+                if value > 0.10 && value < 0.94 { active += 1 }
+                if value >= 0.48 && value < 0.94 { light += 1 }
+                if y > 0 {
+                    edge += abs(value - luminances[(y - 1) * width + x])
+                }
+            }
+            rowActivity[y] = Double(active) / Double(columnWidth)
+            rowLight[y] = Double(light) / Double(columnWidth)
+            rowTexture[y] = edge / Double(columnWidth)
+        }
+
+        let activeSmoothed = movingAverage(rowActivity, window: max(3, height / 180))
+        let activeThreshold = max(0.10, min(0.38, median(activeSmoothed) + standardDeviation(activeSmoothed) * 0.20))
+        let filmRows = mergeCloseSegments(
+            thresholdSegments(values: activeSmoothed, threshold: activeThreshold, minimumSize: max(24, height / 18), lessThan: false),
+            maxGap: max(6, height / 100)
+        )
+        guard let strip = filmRows.max(by: { $0.size < $1.size }), strip.size > max(40, height / 6) else { return [] }
+
+        let lightSmoothed = movingAverage(rowLight, window: max(3, height / 220))
+        let textureSmoothed = movingAverage(rowTexture, window: max(3, height / 220))
+        let maxTexture = max(textureSmoothed.max() ?? 0, 0.001)
+        var gapScore = [Double](repeating: 0, count: height)
+        for y in strip.start..<strip.end {
+            gapScore[y] = lightSmoothed[y] * 0.92 + activeSmoothed[y] * 0.22 - (textureSmoothed[y] / maxTexture) * 0.20
+        }
+
+        let stripScores = Array(gapScore[strip.start..<strip.end])
+        let gapThreshold = max(0.30, min(0.72, median(stripScores) + standardDeviation(stripScores) * 0.62))
+        var gaps = thresholdSegments(
+            values: stripScores,
+            threshold: gapThreshold,
+            minimumSize: max(2, height / 260),
+            lessThan: false
+        ).map { IntSegment(start: strip.start + $0.start, end: strip.start + $0.end) }
+
+        let maxGapSize = max(6, strip.size / 7)
+        gaps = mergeCloseSegments(gaps, maxGap: max(2, height / 260)).filter { gap in
+            gap.size <= maxGapSize
+        }
+
+        if gaps.count < 2 {
+            return framesByRegularLightSpacing(strip: strip, xStart: xStart, xEnd: xEnd, luminances: luminances, width: width, height: height)
+        }
+
+        var boundaries: [IntSegment] = []
+        boundaries.append(IntSegment(start: strip.start, end: strip.start))
+        boundaries.append(contentsOf: gaps)
+        boundaries.append(IntSegment(start: strip.end, end: strip.end))
+
+        var frames: [CGRect] = []
+        for pair in zip(boundaries, boundaries.dropFirst()) {
+            let top = pair.0.end
+            let bottom = pair.1.start
+            guard bottom - top >= max(22, strip.size / 14) else { continue }
+            frames.append(refineNegativeFrameRect(xStart: xStart, xEnd: xEnd, yStart: top, yEnd: bottom, luminances: luminances, width: width, height: height))
+        }
+
+        return keepConsistentNegativeFrames(frames)
+    }
+
+    private func framesByRegularLightSpacing(strip: IntSegment, xStart: Int, xEnd: Int, luminances: [Double], width: Int, height: Int) -> [CGRect] {
+        let frameWidth = xEnd - xStart
+        guard frameWidth > 0 else { return [] }
+        let expectedHeight = Int(Double(frameWidth) * 1.45)
+        let estimatedCount = max(1, Int(round(Double(strip.size) / Double(max(1, expectedHeight)))))
+        guard estimatedCount > 1 && estimatedCount <= 24 else { return [] }
+        let step = Double(strip.size) / Double(estimatedCount)
+        var frames: [CGRect] = []
+        for index in 0..<estimatedCount {
+            let top = strip.start + Int(round(Double(index) * step))
+            let bottom = strip.start + Int(round(Double(index + 1) * step))
+            guard bottom - top >= max(22, strip.size / 18) else { continue }
+            frames.append(refineNegativeFrameRect(xStart: xStart, xEnd: xEnd, yStart: top, yEnd: bottom, luminances: luminances, width: width, height: height))
+        }
+        return keepConsistentNegativeFrames(frames)
+    }
+
+    private func refineNegativeFrameRect(xStart: Int, xEnd: Int, yStart: Int, yEnd: Int, luminances: [Double], width: Int, height: Int) -> CGRect {
+        var left = xStart
+        var right = xEnd
+        var top = max(0, yStart)
+        var bottom = min(height, yEnd)
+        let maxXInset = max(1, (right - left) / 8)
+        let maxYInset = max(1, (bottom - top) / 12)
+
+        func columnBodyRatio(_ x: Int) -> Double {
+            var body = 0
+            for y in top..<bottom {
+                let value = luminances[y * width + x]
+                if value > 0.10 && value < 0.90 { body += 1 }
+            }
+            return Double(body) / Double(max(1, bottom - top))
+        }
+
+        func rowBodyRatio(_ y: Int) -> Double {
+            var body = 0
+            for x in left..<right {
+                let value = luminances[y * width + x]
+                if value > 0.10 && value < 0.90 { body += 1 }
+            }
+            return Double(body) / Double(max(1, right - left))
+        }
+
+        while left + 4 < right, left - xStart < maxXInset, columnBodyRatio(left) < 0.18 { left += 1 }
+        while left + 4 < right, xEnd - right < maxXInset, columnBodyRatio(right - 1) < 0.18 { right -= 1 }
+        while top + 4 < bottom, top - yStart < maxYInset, rowBodyRatio(top) < 0.18 { top += 1 }
+        while top + 4 < bottom, yEnd - bottom < maxYInset, rowBodyRatio(bottom - 1) < 0.18 { bottom -= 1 }
+
+        return CGRect(
+            x: Double(left) / Double(width),
+            y: Double(top) / Double(height),
+            width: Double(right - left) / Double(width),
+            height: Double(bottom - top) / Double(height)
+        ).normalized
+    }
+
+    private func keepConsistentNegativeFrames(_ rects: [CGRect]) -> [CGRect] {
+        guard rects.count > 2 else { return rects }
+        let areas = rects.map(\.area)
+        let medianArea = median(areas)
+        guard medianArea > 0 else { return rects }
+        return rects.filter { rect in
+            let areaRatio = rect.area / medianArea
+            return areaRatio >= 0.42 && areaRatio <= 2.35
+        }
     }
 
     private func detectFilmFrames(luminances: [Double], width: Int, height: Int, settings: CropSettings) -> [CropRegion] {
@@ -3369,5 +4111,12 @@ private extension Array where Element == Double {
     var average: Double {
         guard !isEmpty else { return 0 }
         return reduce(0, +) / Double(count)
+    }
+}
+
+private extension Int {
+    func positiveModulo(_ divisor: Int) -> Int {
+        let value = self % divisor
+        return value < 0 ? value + divisor : value
     }
 }

@@ -2,9 +2,11 @@
 
 # Swift Package Manager build output
 项目源码/.build/
+FionaFFF-CodexProject/项目源码/.build/
 
 # Packaged apps, installers, and generated archives
 项目源码/dist/
+FionaFFF-CodexProject/项目源码/dist/
 可运行安装包/
 *.app/
 *.dmg
@@ -20,3 +22,6 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Local helper dependencies
+.tools/
