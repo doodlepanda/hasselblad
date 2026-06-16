@@ -17,7 +17,12 @@ struct ImageProcessor: Sendable {
     private let detectionPipeline = CropDetectionPipeline()
     private let processingPolicy = ProcessingPolicy()
 
+    private func syncFFFParsing(_ settings: CropSettings) {
+        FFFParsingRuntime.isEnabled = settings.fffParsingEnabled
+    }
+
     func locate(photos: [PhotoItem], settings: CropSettings, sampleProfiles: [SampleProfile] = []) async -> [PhotoProcessResult] {
+        syncFFFParsing(settings)
         var results: [PhotoProcessResult] = []
         for photo in photos where !photo.isManual {
             if Task.isCancelled { break }
@@ -35,6 +40,7 @@ struct ImageProcessor: Sendable {
     }
 
     func process(task: FolderTask, settings: CropSettings, sampleProfiles: [SampleProfile] = []) async -> [PhotoProcessResult] {
+        syncFFFParsing(settings)
         var results: [PhotoProcessResult] = []
         for photo in task.photos {
             if Task.isCancelled { break }
@@ -49,6 +55,7 @@ struct ImageProcessor: Sendable {
     }
 
     func processSingleFile(url: URL, outputDirectory: URL, settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> PhotoProcessResult {
+        syncFFFParsing(settings)
         let candidates = detectCropCandidates(for: url, settings: settings, sampleProfiles: sampleProfiles)
         let regions = preferredRegions(from: candidates, settings: settings)
         let stem = url.deletingPathExtension().lastPathComponent
@@ -67,10 +74,12 @@ struct ImageProcessor: Sendable {
     }
 
     func detectCropRegions(for url: URL, settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> [CropRegion] {
-        preferredRegions(from: detectCropCandidates(for: url, settings: settings, sampleProfiles: sampleProfiles), settings: settings)
+        syncFFFParsing(settings)
+        return preferredRegions(from: detectCropCandidates(for: url, settings: settings, sampleProfiles: sampleProfiles), settings: settings)
     }
 
     func detectCropCandidates(for url: URL, settings: CropSettings, sampleProfiles: [SampleProfile] = []) -> [CropCandidate] {
+        syncFFFParsing(settings)
         guard let cgImage = analysisCGImage(for: url, maxPixelSize: 8192) else {
             return fallbackCandidates(settings: settings)
         }
@@ -818,7 +827,7 @@ struct ImageProcessor: Sendable {
     }
 
     private func analysisCGImage(for url: URL, maxPixelSize: Int) -> CGImage? {
-        if let decoder = HasselbladFFFDecoder(url: url) {
+        if let decoder = FFFParsingRuntime.decoder(for: url) {
             return decoder.makePreviewCGImage(maxPixelSize: maxPixelSize)
         }
 
@@ -845,7 +854,9 @@ struct ImageProcessor: Sendable {
 
     private func isTIFFURL(_ url: URL) -> Bool {
         let fileExtension = url.pathExtension.lowercased()
-        return fileExtension == "tif" || fileExtension == "tiff" || fileExtension == "fff"
+        return fileExtension == "tif"
+            || fileExtension == "tiff"
+            || (FFFParsingRuntime.isEnabled && FFFParsingRuntime.fileExtensions.contains(fileExtension))
     }
 
     private func detectPreciseSingleBlackBorder(cgImage: CGImage, url: URL) -> CropRegion? {
@@ -1109,6 +1120,7 @@ struct ImageProcessor: Sendable {
     }
 
     private func writeCrops(sourceURL: URL, regions: [CropRegion], settings: CropSettings, rotationDegrees: Double, outputURLForSlice: (Int) -> URL) -> [URL] {
+        syncFFFParsing(settings)
         if let fffOutputs = writeFFFCrops(sourceURL: sourceURL, regions: regions, settings: settings, rotationDegrees: rotationDegrees, outputURLForSlice: outputURLForSlice) {
             return fffOutputs
         }
@@ -1151,7 +1163,7 @@ struct ImageProcessor: Sendable {
     }
 
     private func writeFFFCrops(sourceURL: URL, regions: [CropRegion], settings: CropSettings, rotationDegrees: Double, outputURLForSlice: (Int) -> URL) -> [URL]? {
-        guard let decoder = HasselbladFFFDecoder(url: sourceURL) else { return nil }
+        guard let decoder = FFFParsingRuntime.decoder(for: sourceURL) else { return nil }
 
         var outputs: [URL] = []
         for (offset, region) in regions.enumerated() {
@@ -1293,12 +1305,14 @@ struct ImageProcessor: Sendable {
         }
 
         let strength = max(0, min(100, settings.dustRemovalStrength))
-        let brightFloor = UInt8(max(72, 160 - strength * 0.60))
-        let contrastThreshold = Int(max(7, 34 - strength * 0.24))
-        let maxSpotArea = Int(max(4, 10 + strength * 0.82))
-        let maxLineLength = Int(max(48, 90 + strength * 6.2))
+        let brightFloor = UInt8(max(145, 192 - strength * 0.42))
+        let contrastThreshold = Int(max(14, 42 - strength * 0.30))
+        let maxSpotArea = Int(max(4, 8 + strength * 0.45))
+        let maxLineLength = Int(max(48, 70 + strength * 3.0))
         let slenderLimit = Int(max(2, 2 + strength / 24))
-        let repairRadius = strength >= 85 ? 3 : 2
+        let repairRadius = strength >= 85 ? 2 : 1
+        let chromaLimit = Int(max(18, 34 - strength * 0.12))
+        let textureLimit = Int(max(18, 36 - strength * 0.10))
 
         var luma = [UInt8](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
@@ -1318,6 +1332,16 @@ struct ImageProcessor: Sendable {
                     let index = row + x
                     let value = Int(luma[index])
                     guard value >= Int(brightFloor) else { continue }
+                    let offset = index * bytesPerPixel
+                    let red = Int(pixels[offset])
+                    let green = Int(pixels[offset + 1])
+                    let blue = Int(pixels[offset + 2])
+                    let channelMax = max(red, max(green, blue))
+                    let channelMin = min(red, min(green, blue))
+                    let isNeutralBright = channelMax - channelMin <= chromaLimit || channelMin >= 242
+                    guard isNeutralBright else { continue }
+                    let texture = localTexture(luma: luma, width: width, height: height, x: x, y: y)
+                    guard texture <= textureLimit || (channelMin >= 248 && texture <= textureLimit + 10) else { continue }
                     let background = localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)
                     if value - Int(background) >= contrastThreshold {
                         candidates[index] = true
@@ -1327,7 +1351,7 @@ struct ImageProcessor: Sendable {
         }
 
         var mask = filteredDustMask(candidates: candidates, width: width, height: height, maxSpotArea: maxSpotArea, maxLineLength: maxLineLength, slenderLimit: slenderLimit)
-        if strength >= 82 {
+        if strength >= 95 {
             mask = dilatedDustMask(mask, width: width, height: height)
         }
 
@@ -1369,12 +1393,14 @@ struct ImageProcessor: Sendable {
         let bitmapInfo = CGBitmapInfo(rawValue: (littleEndian ? CGBitmapInfo.byteOrder16Little.rawValue : CGBitmapInfo.byteOrder16Big.rawValue) | CGImageAlphaInfo.none.rawValue)
 
         let strength = max(0, min(100, settings.dustRemovalStrength))
-        let brightFloor = UInt16(max(72, 160 - strength * 0.60) * 257)
-        let contrastThreshold = UInt16(max(7, 34 - strength * 0.24) * 257)
-        let maxSpotArea = Int(max(4, 10 + strength * 0.82))
-        let maxLineLength = Int(max(48, 90 + strength * 6.2))
+        let brightFloor = UInt16(max(145, 192 - strength * 0.42) * 257)
+        let contrastThreshold = UInt16(max(14, 42 - strength * 0.30) * 257)
+        let maxSpotArea = Int(max(4, 8 + strength * 0.45))
+        let maxLineLength = Int(max(48, 70 + strength * 3.0))
         let slenderLimit = Int(max(2, 2 + strength / 24))
-        let repairRadius = strength >= 85 ? 3 : 2
+        let repairRadius = strength >= 85 ? 2 : 1
+        let chromaLimit = UInt16(max(18, 34 - strength * 0.12) * 257)
+        let textureLimit = UInt16(max(18, 36 - strength * 0.10) * 257)
 
         var luma = [UInt16](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
@@ -1394,6 +1420,16 @@ struct ImageProcessor: Sendable {
                     let index = row + x
                     let value = luma[index]
                     guard value >= brightFloor else { continue }
+                    let offset = index * bytesPerPixel
+                    let red = readUInt16(pixels, offset: offset, littleEndian: littleEndian)
+                    let green = readUInt16(pixels, offset: offset + 2, littleEndian: littleEndian)
+                    let blue = readUInt16(pixels, offset: offset + 4, littleEndian: littleEndian)
+                    let channelMax = max(red, max(green, blue))
+                    let channelMin = min(red, min(green, blue))
+                    let isNeutralBright = channelMax - channelMin <= chromaLimit || channelMin >= 62194
+                    guard isNeutralBright else { continue }
+                    let texture = localTexture(luma: luma, width: width, height: height, x: x, y: y)
+                    guard texture <= textureLimit || (channelMin >= 63736 && texture <= textureLimit + 2570) else { continue }
                     let background = UInt16(min(65535, localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)))
                     if value > background, value - background >= contrastThreshold {
                         candidates[index] = true
@@ -1403,7 +1439,7 @@ struct ImageProcessor: Sendable {
         }
 
         var mask = filteredDustMask(candidates: candidates, width: width, height: height, maxSpotArea: maxSpotArea, maxLineLength: maxLineLength, slenderLimit: slenderLimit)
-        if strength >= 82 {
+        if strength >= 95 {
             mask = dilatedDustMask(mask, width: width, height: height)
         }
 
@@ -1544,6 +1580,30 @@ struct ImageProcessor: Sendable {
         let innerArea = UInt64((innerRight - innerLeft) * (innerBottom - innerTop))
         let area = max(1, outerArea - innerArea)
         return UInt32((outerSum - innerSum) / area)
+    }
+
+    private func localTexture(luma: [UInt8], width: Int, height: Int, x: Int, y: Int) -> Int {
+        let center = Int(luma[y * width + x])
+        var strongest = 0
+        for yy in max(0, y - 1)...min(height - 1, y + 1) {
+            for xx in max(0, x - 1)...min(width - 1, x + 1) {
+                guard xx != x || yy != y else { continue }
+                strongest = max(strongest, abs(center - Int(luma[yy * width + xx])))
+            }
+        }
+        return strongest
+    }
+
+    private func localTexture(luma: [UInt16], width: Int, height: Int, x: Int, y: Int) -> UInt16 {
+        let center = Int(luma[y * width + x])
+        var strongest = 0
+        for yy in max(0, y - 1)...min(height - 1, y + 1) {
+            for xx in max(0, x - 1)...min(width - 1, x + 1) {
+                guard xx != x || yy != y else { continue }
+                strongest = max(strongest, abs(center - Int(luma[yy * width + xx])))
+            }
+        }
+        return UInt16(min(65535, strongest))
     }
 
     private func rectSum(integral: [UInt64], stride: Int, left: Int, top: Int, right: Int, bottom: Int) -> UInt64 {

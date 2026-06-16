@@ -71,11 +71,15 @@ final class AppStore: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        if let fffType = UTType(filenameExtension: "fff") {
-            panel.allowedContentTypes = [.image, .folder, fffType]
-        } else {
-            panel.allowedContentTypes = [.image, .folder]
+        var contentTypes: [UTType] = [.image, .folder]
+        if settings.fffParsingEnabled {
+            for fileExtension in FFFParsingRuntime.fileExtensions {
+                if let type = UTType(filenameExtension: fileExtension) {
+                    contentTypes.append(type)
+                }
+            }
         }
+        panel.allowedContentTypes = contentTypes
         panel.prompt = "导入"
         panel.message = "选择图片文件或包含图片的文件夹"
         if panel.runModal() == .OK {
@@ -91,9 +95,10 @@ final class AppStore: ObservableObject {
         var totalSubfolders = 0
         var totalImages = 0
         var defaultExportDirectory: URL?
+        FFFParsingRuntime.isEnabled = settings.fffParsingEnabled
 
         for url in urls {
-            guard let result = try? scanner.scan(url: url), !result.tasks.isEmpty else { continue }
+            guard let result = try? scanner.scan(url: url, includeFFFParsing: settings.fffParsingEnabled), !result.tasks.isEmpty else { continue }
             imported.append(contentsOf: result.tasks.map { editStore.restoredTask($0) })
             totalFolders += result.folderCount
             totalSubfolders += result.subfolderCount
@@ -103,7 +108,9 @@ final class AppStore: ObservableObject {
 
         guard !imported.isEmpty else {
             logMessage = "没有找到可处理图片。"
-            logSubMessage = "支持 jpg、jpeg、png、heic、heif、tiff、tif、fff、bmp、gif。"
+            logSubMessage = settings.fffParsingEnabled
+                ? "支持 jpg、jpeg、png、heic、heif、tiff、tif、fff、3f、bmp、gif。"
+                : "FFF/3F 解析已关闭，仅导入 jpg、png、heic、tiff、bmp、gif 等普通图片。"
             return
         }
 
@@ -513,6 +520,7 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].detail = "正在按红框尺寸识别各画面位置"
         logMessage = "正在按红框大小套用。"
         logSubMessage = "当前页面红框保持不变，只套用到其他图片。"
+        FFFParsingRuntime.isEnabled = currentSettings.fffParsingEnabled
 
         Task { [weak self, processor, photos, taskID, template, currentSettings] in
             for photo in photos {
@@ -562,6 +570,7 @@ final class AppStore: ObservableObject {
         tasks[indexes.task].detail = "正在按左上第一张锚点应用到其他图片"
         logMessage = "正在应用到当前文件夹其他图片。"
         logSubMessage = "当前页面红框保持不变，其他图片会按左上第一张重新定位。"
+        FFFParsingRuntime.isEnabled = settings.fffParsingEnabled
 
         Task { [weak self, processor, photoJobs, sourceRegions, sourceAnchor, taskIndex, currentPhotoIndex] in
             var resolved: [(Int, [CropRegion])] = []
@@ -1076,6 +1085,9 @@ final class AppStore: ObservableObject {
     }
 
     private func imageAspect(url: URL) -> Double? {
+        if let decoder = FFFParsingRuntime.decoder(for: url) {
+            return Double(decoder.info.width) / Double(max(decoder.info.height, 1))
+        }
         guard let source = CGImageSourceCreateWithURL(
             url as CFURL,
             [

@@ -8,15 +8,15 @@ struct FolderScanResult {
 }
 
 struct FolderScanner {
-    private let supportedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "fff", "bmp", "gif"]
+    private let rasterExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "bmp", "gif"]
 
-    func scan(url: URL) throws -> FolderScanResult {
+    func scan(url: URL, includeFFFParsing: Bool = true) throws -> FolderScanResult {
         let root = url.standardizedFileURL
         let manager = FileManager.default
         let values = try? root.resourceValues(forKeys: [.isDirectoryKey])
 
         if values?.isDirectory != true {
-            return scanFile(url: root)
+            return scanFile(url: root, includeFFFParsing: includeFFFParsing)
         }
 
         var grouped: [URL: [PhotoItem]] = [:]
@@ -37,7 +37,7 @@ struct FolderScanner {
                 continue
             }
 
-            guard supportedExtensions.contains(fileURL.pathExtension.lowercased()) else { continue }
+            guard isSupported(fileURL, includeFFFParsing: includeFFFParsing) else { continue }
             let parent = fileURL.deletingLastPathComponent().standardizedFileURL
             allFolders.insert(parent)
             let relative = relativePath(from: root, to: fileURL)
@@ -67,8 +67,8 @@ struct FolderScanner {
         )
     }
 
-    private func scanFile(url: URL) -> FolderScanResult {
-        guard supportedExtensions.contains(url.pathExtension.lowercased()) else {
+    private func scanFile(url: URL, includeFFFParsing: Bool) -> FolderScanResult {
+        guard isSupported(url, includeFFFParsing: includeFFFParsing) else {
             return FolderScanResult(tasks: [], folderCount: 0, subfolderCount: 0, imageCount: 0)
         }
 
@@ -82,6 +82,12 @@ struct FolderScanner {
             photos: [photo]
         )
         return FolderScanResult(tasks: [task], folderCount: 1, subfolderCount: 0, imageCount: 1)
+    }
+
+    private func isSupported(_ url: URL, includeFFFParsing: Bool) -> Bool {
+        let fileExtension = url.pathExtension.lowercased()
+        if rasterExtensions.contains(fileExtension) { return true }
+        return includeFFFParsing && FFFParsingRuntime.fileExtensions.contains(fileExtension)
     }
 
     private func relativePath(from root: URL, to file: URL) -> String {

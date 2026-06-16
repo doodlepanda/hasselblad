@@ -8,6 +8,20 @@ struct HasselbladFFFInfo: Sendable {
     var samplesPerPixel: Int
 }
 
+enum FFFParsingRuntime {
+    nonisolated(unsafe) static var isEnabled = true
+    static let fileExtensions: Set<String> = ["fff", "3f"]
+
+    static func isFFFLikeURL(_ url: URL) -> Bool {
+        fileExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    static func decoder(for url: URL) -> HasselbladFFFDecoder? {
+        guard isEnabled else { return nil }
+        return HasselbladFFFDecoder(url: url)
+    }
+}
+
 final class HasselbladFFFDecoder {
     private enum Endian {
         case little
@@ -30,7 +44,7 @@ final class HasselbladFFFDecoder {
     private let rowsPerStrip: Int
 
     init?(url: URL) {
-        guard url.pathExtension.lowercased() == "fff",
+        guard FFFParsingRuntime.fileExtensions.contains(url.pathExtension.lowercased()),
               let handle = try? FileHandle(forReadingFrom: url) else {
             return nil
         }

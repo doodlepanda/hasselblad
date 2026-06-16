@@ -100,7 +100,7 @@ private struct ImageSignature: Codable, Equatable {
     var modificationTime: Date?
 
     init?(url: URL) {
-        if let decoder = HasselbladFFFDecoder(url: url) {
+        if let decoder = FFFParsingRuntime.decoder(for: url) {
             let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             pixelWidth = decoder.info.width
             pixelHeight = decoder.info.height

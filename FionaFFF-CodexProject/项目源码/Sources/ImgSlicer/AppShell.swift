@@ -105,7 +105,7 @@ final class ImagePreviewCache: @unchecked Sendable {
     }()
 
     func key(for url: URL, maxPixelSize: Int) -> String {
-        "\(url.path)#\(maxPixelSize)"
+        "\(url.path)#\(maxPixelSize)#fff:\(FFFParsingRuntime.isEnabled ? 1 : 0)"
     }
 
     func cachedImage(for url: URL, maxPixelSize: Int) -> NSImage? {
@@ -118,7 +118,7 @@ final class ImagePreviewCache: @unchecked Sendable {
             return cached
         }
 
-        if let decoder = HasselbladFFFDecoder(url: url),
+        if let decoder = FFFParsingRuntime.decoder(for: url),
            let cgImage = decoder.makePreviewCGImage(maxPixelSize: maxPixelSize) {
             let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
             cache.setObject(image, forKey: key)
@@ -1140,6 +1140,19 @@ struct ParameterPanel: View {
                     }
                     SettingsGroup("导出设置") {
                         VStack(alignment: .leading, spacing: 10) {
+                            Toggle(isOn: $store.settings.fffParsingEnabled) {
+                                HStack(spacing: 7) {
+                                    Image(systemName: "camera.aperture")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(AppTheme.blue)
+                                    Text("解析 FFF/3F 文件")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(AppTheme.text)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .help("关闭后导入文件夹会跳过 .fff/.3f，预览和导出也不会读取 Hasselblad 3F/FFF 文件")
+
                             Picker("", selection: $store.settings.exportFormat) {
                                 ForEach(ExportFormat.allCases) { format in
                                     Text(format.rawValue).tag(format)
@@ -1213,6 +1226,9 @@ struct ParameterPanel: View {
         .onChange(of: store.settings.preprocessMode) { _, _ in store.redetectSelectedPhoto() }
         .onChange(of: store.settings.algorithmMode) { _, _ in store.redetectSelectedPhoto() }
         .onChange(of: store.settings.orientation) { _, _ in store.redetectSelectedPhoto() }
+        .onChange(of: store.settings.fffParsingEnabled) { _, enabled in
+            FFFParsingRuntime.isEnabled = enabled
+        }
     }
 }
 

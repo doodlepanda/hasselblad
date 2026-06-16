@@ -167,6 +167,7 @@ struct CropSettings: Sendable {
     var exportDirectory: URL?
     var dustRemovalEnabled: Bool = false
     var dustRemovalStrength: Double = 35
+    var fffParsingEnabled: Bool = true
 }
 
 private extension CGRect {

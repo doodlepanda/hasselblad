@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
 APP_VERSION="0.35.2"
-APP_BUILD="61"
+APP_BUILD="65"
 RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -115,9 +115,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-61</string>
+  <string>0.35.2-legacy-65</string>
   <key>CFBundleVersion</key>
-  <string>61</string>
+  <string>65</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>
@@ -161,6 +161,7 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 - DMG：$RELEASE_NAME.dmg
 
 本次更新：
+- 优化除尘算法：增加白色/低色彩瑕疵判断和局部纹理保护，避免树叶、屋顶纹理、雕花高光被误判后出现涂抹变形。
 - 取消色阶、曲线、白平衡工具入口。
 - 左侧放大镜支持快捷键 D；默认关闭，避免拖动红框时额外绘制造成卡顿。
 - 优化拖动性能：拖动过程中不再持续保存和刷新统计，松手后再提交红框变化。
@@ -183,6 +184,9 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 - 右侧“统一微调”方向按钮支持按住连续移动，松开停止，便于快速整体校准红框位置。
 - 自动识别默认采用“中心投影”候选，其他 2x6 固定胶片、浅色/黑色片距、模板定位仍保留在算法结果下拉中作为备选。
 - 底部胶片栏改为深色缩略图卡片，去掉按钮自带大白边，缩略图按原始比例完整显示在底部边栏内。
+- 增加“解析 FFF/3F 文件”开关；关闭后导入会跳过 .fff/.3f 文件，预览、识别和导出也不会读取 Hasselblad FFF/3F 解码器。
+- 放大镜针对 27 寸显示器增大显示区域，并减少外侧取样留白，让红框边缘检查的实际放大效果更明显。
+- 调整底部胶片栏单张文件删除按钮：按钮放大并内移，选择点击区域避开右上角，避免删除按钮被遮挡或点不到。
 - 修复胶片专用识别结果又被当前红框模板尺寸覆盖的问题；负片/胶片分支现在直接使用算法计算出的真实照片边界，避免 12 张被重叠去重成少数几张。
 - 导出文件名序号按红框行列顺序生成：先按第一行从左到右，再第二行从左到右；同一行轻微上下偏差不会打乱编号。
 - 优化鼠标滚轮缩放：合并高频滚轮事件，缩放过程中使用低插值快速预览，停止滚轮后恢复高质量重绘，减少卡顿。

@@ -74,12 +74,12 @@ struct LegacyDetectionResult {
 }
 
 enum LegacyFolderScanner {
-    private static let supportedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "fff", "bmp", "gif"]
+    private static let rasterExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tiff", "tif", "bmp", "gif"]
 
-    static func scan(urls: [URL]) -> [URL] {
+    static func scan(urls: [URL], includeFFFParsing: Bool = true) -> [URL] {
         var result: [URL] = []
         for url in urls {
-            result.append(contentsOf: scan(url: url.standardizedFileURL))
+            result.append(contentsOf: scan(url: url.standardizedFileURL, includeFFFParsing: includeFFFParsing))
         }
         var seen = Set<String>()
         return result
@@ -87,10 +87,10 @@ enum LegacyFolderScanner {
             .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
-    private static func scan(url: URL) -> [URL] {
+    private static func scan(url: URL, includeFFFParsing: Bool) -> [URL] {
         let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         if !isDirectory {
-            return supportedExtensions.contains(url.pathExtension.lowercased()) ? [url] : []
+            return isSupported(url, includeFFFParsing: includeFFFParsing) ? [url] : []
         }
         guard let enumerator = FileManager.default.enumerator(
             at: url,
@@ -103,11 +103,17 @@ enum LegacyFolderScanner {
         for case let fileURL as URL in enumerator {
             let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey])
             if values?.isDirectory == true { continue }
-            if supportedExtensions.contains(fileURL.pathExtension.lowercased()) {
+            if isSupported(fileURL, includeFFFParsing: includeFFFParsing) {
                 files.append(fileURL)
             }
         }
         return files
+    }
+
+    private static func isSupported(_ url: URL, includeFFFParsing: Bool) -> Bool {
+        let fileExtension = url.pathExtension.lowercased()
+        if rasterExtensions.contains(fileExtension) { return true }
+        return includeFFFParsing && FFFParsingRuntime.fileExtensions.contains(fileExtension)
     }
 }
 
@@ -291,6 +297,7 @@ final class LegacyWindowController: NSViewController {
     private let taskPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let photoPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let fffParsingCheckbox = NSButton(checkboxWithTitle: "解析 FFF/3F 文件", target: nil, action: nil)
     private let dustRemovalCheckbox = NSButton(checkboxWithTitle: "除尘导出", target: nil, action: nil)
     private let dustStrengthSlider = NSSlider(value: 35, minValue: 0, maxValue: 100, target: nil, action: nil)
     private let dustStrengthLabel = NSTextField(labelWithString: "强度 35")
@@ -351,6 +358,10 @@ final class LegacyWindowController: NSViewController {
         formatPopup.addItems(withTitles: ["TIF 16-bit", "JPG"])
         formatPopup.target = self
         formatPopup.action = #selector(formatChanged)
+        fffParsingCheckbox.state = .on
+        fffParsingCheckbox.target = self
+        fffParsingCheckbox.action = #selector(fffParsingChanged)
+        FFFParsingRuntime.isEnabled = true
         dustRemovalCheckbox.target = self
         dustRemovalCheckbox.action = #selector(dustRemovalChanged)
         dustStrengthSlider.target = self
@@ -620,7 +631,7 @@ final class LegacyWindowController: NSViewController {
         bar.layer?.backgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1).cgColor
 
         let title = label("FionaFFF", size: 15, weight: .semibold, color: NSColor(calibratedWhite: 0.92, alpha: 1))
-        let subtitle = label("Mojave build 0.35.2-61", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
+        let subtitle = label("Mojave build 0.35.2-64", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         let stack = NSStackView(views: [title, subtitle])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -751,6 +762,8 @@ final class LegacyWindowController: NSViewController {
         zoomRow.spacing = 6
         formatPopup.translatesAutoresizingMaskIntoConstraints = false
         algorithmPopup.translatesAutoresizingMaskIntoConstraints = false
+        fffParsingCheckbox.font = NSFont.systemFont(ofSize: 12)
+        fffParsingCheckbox.contentTintColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         dustRemovalCheckbox.font = NSFont.systemFont(ofSize: 12)
         dustRemovalCheckbox.contentTintColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         dustStrengthSlider.translatesAutoresizingMaskIntoConstraints = false
@@ -782,6 +795,7 @@ final class LegacyWindowController: NSViewController {
             label("算法结果", size: 12, weight: .semibold),
             algorithmPopup,
             label("导出格式", size: 12, weight: .semibold),
+            fffParsingCheckbox,
             formatPopup,
             dustRow,
             dustStrengthSlider,
@@ -958,16 +972,24 @@ final class LegacyWindowController: NSViewController {
         panel.canChooseDirectories = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
-        panel.allowedFileTypes = ["tif", "tiff", "fff", "jpg", "jpeg", "png", "bmp"]
+        var fileTypes = ["tif", "tiff", "jpg", "jpeg", "png", "bmp"]
+        if fffParsingCheckbox.state == .on {
+            fileTypes.append(contentsOf: FFFParsingRuntime.fileExtensions)
+        }
+        panel.allowedFileTypes = fileTypes
         if panel.runModal() == .OK {
             importItems(panel.urls)
         }
     }
 
     private func importItems(_ urls: [URL]) {
-        let found = LegacyFolderScanner.scan(urls: urls)
+        let includeFFFParsing = fffParsingCheckbox.state == .on
+        FFFParsingRuntime.isEnabled = includeFFFParsing
+        let found = LegacyFolderScanner.scan(urls: urls, includeFFFParsing: includeFFFParsing)
         guard !found.isEmpty else {
-            statusLabel.stringValue = "没有找到可处理图片。"
+            statusLabel.stringValue = includeFFFParsing
+                ? "没有找到可处理图片。"
+                : "没有找到可处理图片；FFF/3F 解析已关闭。"
             return
         }
         for url in found {
@@ -1119,7 +1141,7 @@ final class LegacyWindowController: NSViewController {
     }
 
     private static func imageAspect(url: URL) -> Double? {
-        if let decoder = HasselbladFFFDecoder(url: url) {
+        if let decoder = FFFParsingRuntime.decoder(for: url) {
             return Double(decoder.info.width) / Double(max(decoder.info.height, 1))
         }
         guard let source = CGImageSourceCreateWithURL(
@@ -1191,7 +1213,7 @@ final class LegacyWindowController: NSViewController {
             let deleteButton = NSButton(title: "×", target: self, action: #selector(deleteFilmstripPhoto(_:)))
             deleteButton.tag = index
             deleteButton.bezelStyle = .circular
-            deleteButton.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            deleteButton.font = NSFont.systemFont(ofSize: 12, weight: .bold)
             deleteButton.toolTip = "从当前任务移除这个文件"
             deleteButton.translatesAutoresizingMaskIntoConstraints = false
             let tile = LegacyFilmstripTileView()
@@ -1210,15 +1232,16 @@ final class LegacyWindowController: NSViewController {
                 titleLabel.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
                 titleLabel.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -8),
                 titleLabel.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 6),
-                button.leadingAnchor.constraint(equalTo: tile.leadingAnchor),
-                button.trailingAnchor.constraint(equalTo: tile.trailingAnchor),
-                button.topAnchor.constraint(equalTo: tile.topAnchor),
-                button.bottomAnchor.constraint(equalTo: tile.bottomAnchor),
-                deleteButton.widthAnchor.constraint(equalToConstant: 18),
-                deleteButton.heightAnchor.constraint(equalToConstant: 18),
-                deleteButton.topAnchor.constraint(equalTo: tile.topAnchor, constant: 2),
-                deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -2)
+                button.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
+                button.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -34),
+                button.topAnchor.constraint(equalTo: tile.topAnchor, constant: 4),
+                button.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -4),
+                deleteButton.widthAnchor.constraint(equalToConstant: 24),
+                deleteButton.heightAnchor.constraint(equalToConstant: 24),
+                deleteButton.topAnchor.constraint(equalTo: tile.topAnchor, constant: 7),
+                deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -7)
             ])
+            tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
             filmstripStack.addArrangedSubview(tile)
             let taskIndex = selectedTaskIndex
             let cacheKey = photoKey(photo.url)
@@ -1532,6 +1555,13 @@ final class LegacyWindowController: NSViewController {
 
     @objc private func formatChanged() {
         exportFormat = formatPopup.indexOfSelectedItem == 0 ? .tif : .jpg
+    }
+
+    @objc private func fffParsingChanged() {
+        FFFParsingRuntime.isEnabled = fffParsingCheckbox.state == .on
+        statusLabel.stringValue = FFFParsingRuntime.isEnabled
+            ? "已开启 FFF/3F 文件解析。"
+            : "已关闭 FFF/3F 文件解析；再次导入时会跳过这些文件。"
     }
 
     @objc private func dustRemovalChanged() {
@@ -1974,8 +2004,8 @@ final class LegacyCanvasView: NSView {
     }
 
     private func magnifierFrame(for sourcePoint: CGPoint) -> CGRect {
-        let lensWidth: CGFloat = 320
-        let lensHeight: CGFloat = 220
+        let lensWidth: CGFloat = min(560, max(420, bounds.width * 0.34))
+        let lensHeight: CGFloat = min(360, max(280, bounds.height * 0.34))
         let margin: CGFloat = 14
         let rightX = sourcePoint.x + margin
         let leftX = sourcePoint.x - lensWidth - margin
@@ -2002,8 +2032,8 @@ final class LegacyCanvasView: NSView {
         lensRect.fill()
 
         let crop = activeCrop.rect.normalized
-        let edgePaddingX = max(0.012, crop.width * 0.14)
-        let edgePaddingY = max(0.012, crop.height * 0.14)
+        let edgePaddingX = max(0.004, crop.width * 0.055)
+        let edgePaddingY = max(0.004, crop.height * 0.055)
         let expanded = CGRect(
             x: max(0, crop.minX - edgePaddingX),
             y: max(0, crop.minY - edgePaddingY),
@@ -2016,7 +2046,7 @@ final class LegacyCanvasView: NSView {
             width: max(1, expanded.width * displayImage.size.width),
             height: max(1, expanded.height * displayImage.size.height)
         )
-        let fittedLens = aspectFitRect(sourceSize: sourceRect.size, in: lensRect.insetBy(dx: 6, dy: 6))
+        let fittedLens = aspectFitRect(sourceSize: sourceRect.size, in: lensRect.insetBy(dx: 8, dy: 8))
         NSGraphicsContext.current?.imageInterpolation = .none
         displayImage.draw(in: fittedLens, from: sourceRect, operation: .copy, fraction: 1)
 
@@ -2342,7 +2372,7 @@ enum LegacyToneMapper {
 
 enum LegacyImageIO {
     static func thumbnail(url: URL, maxPixelSize: Int) -> NSImage? {
-        if let decoder = HasselbladFFFDecoder(url: url),
+        if let decoder = FFFParsingRuntime.decoder(for: url),
            let cgImage = decoder.makePreviewCGImage(maxPixelSize: maxPixelSize) {
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
@@ -3636,7 +3666,7 @@ enum LegacyExporter {
     }
 
     private static func exportFFF(url: URL, crops: [LegacyCrop], directory: URL, format: LegacyExportFormat, dustEnabled: Bool, dustStrength: Double, rotationDegrees: Int, inverted: Bool, adjustments: LegacyImageAdjustments) -> [URL]? {
-        guard let decoder = HasselbladFFFDecoder(url: url) else { return nil }
+        guard let decoder = FFFParsingRuntime.decoder(for: url) else { return nil }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var next = nextIndex(directory: directory, ext: format.rawValue)
         var outputs: [URL] = []
@@ -3892,6 +3922,16 @@ enum LegacyExporter {
                     let index = row + x
                     let value = Int(luma[index])
                     guard value >= Int(params.brightFloor8) else { continue }
+                    let offset = index * bytesPerPixel
+                    let red = Int(pixels[offset])
+                    let green = Int(pixels[offset + 1])
+                    let blue = Int(pixels[offset + 2])
+                    let channelMax = max(red, max(green, blue))
+                    let channelMin = min(red, min(green, blue))
+                    let isNeutralBright = channelMax - channelMin <= params.chromaLimit8 || channelMin >= 242
+                    guard isNeutralBright else { continue }
+                    let texture = localTexture(luma: luma, width: width, height: height, x: x, y: y)
+                    guard texture <= params.textureLimit8 || (channelMin >= 248 && texture <= params.textureLimit8 + 10) else { continue }
                     let background = localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)
                     if value - Int(background) >= params.contrastThreshold8 {
                         candidates[index] = true
@@ -3944,6 +3984,16 @@ enum LegacyExporter {
                     let index = row + x
                     let value = luma[index]
                     guard value >= params.brightFloor16 else { continue }
+                    let offset = index * bytesPerPixel
+                    let red = readUInt16(pixels, offset: offset, littleEndian: littleEndian)
+                    let green = readUInt16(pixels, offset: offset + 2, littleEndian: littleEndian)
+                    let blue = readUInt16(pixels, offset: offset + 4, littleEndian: littleEndian)
+                    let channelMax = max(red, max(green, blue))
+                    let channelMin = min(red, min(green, blue))
+                    let isNeutralBright = channelMax - channelMin <= params.chromaLimit16 || channelMin >= 62194
+                    guard isNeutralBright else { continue }
+                    let texture = localTexture(luma: luma, width: width, height: height, x: x, y: y)
+                    guard texture <= params.textureLimit16 || (channelMin >= 63736 && texture <= params.textureLimit16 + 2570) else { continue }
                     let background = UInt16(min(65535, localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)))
                     if value > background, value - background >= params.contrastThreshold16 {
                         candidates[index] = true
@@ -3962,20 +4012,26 @@ enum LegacyExporter {
         return make16BitRGBImage(width: width, height: height, pixels: pixels, colorSpace: image.colorSpace, bitmapInfo: image.bitmapInfo)
     }
 
-    private static func dustParameters(strength rawStrength: Double) -> (brightFloor8: UInt8, brightFloor16: UInt16, contrastThreshold8: Int, contrastThreshold16: UInt16, maxSpotArea: Int, maxLineLength: Int, slenderLimit: Int, repairRadius: Int, shouldDilate: Bool) {
+    private static func dustParameters(strength rawStrength: Double) -> (brightFloor8: UInt8, brightFloor16: UInt16, contrastThreshold8: Int, contrastThreshold16: UInt16, chromaLimit8: Int, chromaLimit16: UInt16, textureLimit8: Int, textureLimit16: UInt16, maxSpotArea: Int, maxLineLength: Int, slenderLimit: Int, repairRadius: Int, shouldDilate: Bool) {
         let strength = max(0, min(100, rawStrength))
-        let brightFloor = max(72, 160 - strength * 0.60)
-        let contrastThreshold = max(7, 34 - strength * 0.24)
+        let brightFloor = max(145, 192 - strength * 0.42)
+        let contrastThreshold = max(14, 42 - strength * 0.30)
+        let chromaLimit = max(18, 34 - strength * 0.12)
+        let textureLimit = max(18, 36 - strength * 0.10)
         return (
             UInt8(brightFloor),
             UInt16(brightFloor * 257),
             Int(contrastThreshold),
             UInt16(contrastThreshold * 257),
-            Int(max(4, 10 + strength * 0.82)),
-            Int(max(48, 90 + strength * 6.2)),
+            Int(chromaLimit),
+            UInt16(chromaLimit * 257),
+            Int(textureLimit),
+            UInt16(textureLimit * 257),
+            Int(max(4, 8 + strength * 0.45)),
+            Int(max(48, 70 + strength * 3.0)),
             Int(max(2, 2 + strength / 24)),
-            strength >= 85 ? 3 : 2,
-            strength >= 82
+            strength >= 85 ? 2 : 1,
+            strength >= 95
         )
     }
 
@@ -4100,6 +4156,30 @@ enum LegacyExporter {
         let outerArea = UInt64((outerRight - outerLeft) * (outerBottom - outerTop))
         let innerArea = UInt64((innerRight - innerLeft) * (innerBottom - innerTop))
         return UInt32((outerSum - innerSum) / max(1, outerArea - innerArea))
+    }
+
+    private static func localTexture(luma: [UInt8], width: Int, height: Int, x: Int, y: Int) -> Int {
+        let center = Int(luma[y * width + x])
+        var strongest = 0
+        for yy in max(0, y - 1)...min(height - 1, y + 1) {
+            for xx in max(0, x - 1)...min(width - 1, x + 1) {
+                guard xx != x || yy != y else { continue }
+                strongest = max(strongest, abs(center - Int(luma[yy * width + xx])))
+            }
+        }
+        return strongest
+    }
+
+    private static func localTexture(luma: [UInt16], width: Int, height: Int, x: Int, y: Int) -> UInt16 {
+        let center = Int(luma[y * width + x])
+        var strongest = 0
+        for yy in max(0, y - 1)...min(height - 1, y + 1) {
+            for xx in max(0, x - 1)...min(width - 1, x + 1) {
+                guard xx != x || yy != y else { continue }
+                strongest = max(strongest, abs(center - Int(luma[yy * width + xx])))
+            }
+        }
+        return UInt16(min(65535, strongest))
     }
 
     private static func rectSum(integral: [UInt64], stride: Int, left: Int, top: Int, right: Int, bottom: Int) -> UInt64 {
