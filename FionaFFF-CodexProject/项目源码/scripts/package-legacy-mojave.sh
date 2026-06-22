@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
 APP_VERSION="0.35.2"
-APP_BUILD="70"
+APP_BUILD="71"
 RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -115,9 +115,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-70</string>
+  <string>0.35.2-legacy-71</string>
   <key>CFBundleVersion</key>
-  <string>70</string>
+  <string>71</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>

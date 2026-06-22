@@ -658,7 +658,7 @@ final class LegacyWindowController: NSViewController {
         bar.layer?.backgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1).cgColor
 
         let title = label("FionaFFF", size: 15, weight: .semibold, color: NSColor(calibratedWhite: 0.92, alpha: 1))
-        let subtitle = label("Mojave build 0.35.2-70", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
+        let subtitle = label("Mojave build 0.35.2-71", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         let stack = NSStackView(views: [title, subtitle])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -1296,6 +1296,7 @@ final class LegacyWindowController: NSViewController {
             for item in [select, name, detail, stop, remove] {
                 row.addSubview(item)
             }
+            taskListStack.addArrangedSubview(row)
             NSLayoutConstraint.activate([
                 row.widthAnchor.constraint(equalTo: taskListStack.widthAnchor),
                 row.heightAnchor.constraint(equalToConstant: 58),
@@ -1320,7 +1321,6 @@ final class LegacyWindowController: NSViewController {
             ])
             row.addSubview(stop, positioned: .above, relativeTo: select)
             row.addSubview(remove, positioned: .above, relativeTo: select)
-            taskListStack.addArrangedSubview(row)
         }
     }
 
