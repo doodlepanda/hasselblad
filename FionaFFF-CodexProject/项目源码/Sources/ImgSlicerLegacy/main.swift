@@ -322,7 +322,8 @@ final class LegacyWindowController: NSViewController {
     private let outputLabel = NSTextField(labelWithString: "默认导出到原文件夹")
     private let cropCountLabel = NSTextField(labelWithString: "红框 0 个")
     private let detectionReportLabel = NSTextField(labelWithString: "算法候选：等待识别")
-    private let algorithmPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let algorithmListScroll = NSScrollView()
+    private let algorithmListStack = NSStackView()
     private let taskListScroll = NSScrollView()
     private let taskListStack = NSStackView()
     private let photoPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -346,11 +347,13 @@ final class LegacyWindowController: NSViewController {
     private var dustRemovalStrength = 35.0
     private var imageAspectCache: [String: Double] = [:]
     private var detectionCandidatesByPhotoPath: [String: [LegacyDetectionCandidate]] = [:]
+    private var selectedAlgorithmIndexByPhotoPath: [String: Int] = [:]
     private var usesLightTheme = false
     private weak var topBarView: NSView?
     private weak var leftPanelView: NSView?
     private weak var rightPanelView: NSView?
     private weak var bottomPanelView: NSView?
+    private var arrowKeyMonitor: Any?
 
     private var selectedTask: LegacyTask? {
         tasks.indices.contains(selectedTaskIndex) ? tasks[selectedTaskIndex] : nil
@@ -388,19 +391,16 @@ final class LegacyWindowController: NSViewController {
         formatPopup.addItems(withTitles: ["TIF 16-bit", "JPG"])
         formatPopup.target = self
         formatPopup.action = #selector(formatChanged)
-        fffParsingCheckbox.state = .on
+        fffParsingCheckbox.state = .off
         fffParsingCheckbox.target = self
         fffParsingCheckbox.action = #selector(fffParsingChanged)
-        FFFParsingRuntime.isEnabled = true
+        FFFParsingRuntime.isEnabled = false
         dustRemovalCheckbox.target = self
         dustRemovalCheckbox.action = #selector(dustRemovalChanged)
         dustStrengthSlider.target = self
         dustStrengthSlider.action = #selector(dustStrengthChanged)
         photoPopup.target = self
         photoPopup.action = #selector(photoSelectionChanged)
-        algorithmPopup.target = self
-        algorithmPopup.action = #selector(algorithmSelectionChanged)
-
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.wantsLayer = true
         canvas.layer?.cornerRadius = 8
@@ -418,6 +418,9 @@ final class LegacyWindowController: NSViewController {
         }
         canvas.onMagnifierToggled = { [weak self] enabled in
             self?.statusLabel.stringValue = enabled ? "已开启拖动放大镜。" : "已关闭拖动放大镜。"
+        }
+        canvas.onNudgeAll = { [weak self] dx, dy in
+            self?.nudgeAllCrops(dx: dx, dy: dy)
         }
         canvas.onFileDropped = { [weak self] urls in
             self?.importItems(urls)
@@ -457,6 +460,37 @@ final class LegacyWindowController: NSViewController {
         ])
         applyTheme()
         LegacyLaunchLog.write("loadView finished")
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        guard arrowKeyMonitor == nil else { return }
+        arrowKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  event.window === self.view.window,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                return event
+            }
+            switch event.keyCode {
+            case 123:
+                self.nudgeAllCrops(dx: -0.001, dy: 0)
+            case 124:
+                self.nudgeAllCrops(dx: 0.001, dy: 0)
+            case 125:
+                self.nudgeAllCrops(dx: 0, dy: -0.001)
+            case 126:
+                self.nudgeAllCrops(dx: 0, dy: 0.001)
+            default:
+                return event
+            }
+            return nil
+        }
+    }
+
+    deinit {
+        if let arrowKeyMonitor {
+            NSEvent.removeMonitor(arrowKeyMonitor)
+        }
     }
 
     private func button(_ title: String, action: Selector) -> NSButton {
@@ -658,7 +692,7 @@ final class LegacyWindowController: NSViewController {
         bar.layer?.backgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1).cgColor
 
         let title = label("FionaFFF", size: 15, weight: .semibold, color: NSColor(calibratedWhite: 0.92, alpha: 1))
-        let subtitle = label("Mojave build 0.35.2-71", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
+        let subtitle = label("Mojave build 0.35.2-72", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         let stack = NSStackView(views: [title, subtitle])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -688,6 +722,71 @@ final class LegacyWindowController: NSViewController {
 
     private func makeLeftPanel() -> NSView {
         let box = panel()
+        let importButton = imageButton(importIcon(), action: #selector(importFile), help: "导入图片文件或文件夹")
+        let openFolderButton = imageButton(revealIcon(), action: #selector(openCurrentImageFolder), help: "打开当前图片所在文件夹")
+        let fileActions = NSStackView(views: [importButton, openFolderButton])
+        fileActions.orientation = .horizontal
+        fileActions.alignment = .centerY
+        fileActions.spacing = 6
+
+        let identifyButton = NSButton(title: "自动识别", target: self, action: #selector(autoIdentify))
+        identifyButton.bezelStyle = .texturedRounded
+        identifyButton.image = magicWandIcon()
+        identifyButton.imagePosition = .imageLeft
+        identifyButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        identifyButton.toolTip = "自动识别当前任务画面"
+        identifyButton.translatesAutoresizingMaskIntoConstraints = false
+        identifyButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        let applyButton = applyAllButton()
+        let rotateLeftButton = arrowButton("↶", action: #selector(rotateSelectedCropLeft), help: "当前选中红框向左旋转 0.5 度")
+        let rotateRightButton = arrowButton("↷", action: #selector(rotateSelectedCropRight), help: "当前选中红框向右旋转 0.5 度")
+        let rotateImageLeftButton = arrowButton("⟲", action: #selector(rotateImageLeft), help: "整张图片向左旋转 90 度，导出方向与预览一致")
+        let rotateImageRightButton = arrowButton("⟳", action: #selector(rotateImageRight), help: "整张图片向右旋转 90 度，导出方向与预览一致")
+        let zoomOutButton = iconButton("NSExitFullScreenTemplate", action: #selector(zoomOut), help: "缩小预览")
+        let resetZoomButton = smallButton("100%", action: #selector(resetZoom))
+        resetZoomButton.toolTip = "恢复 100% 预览"
+        let zoomInButton = iconButton("NSEnterFullScreenTemplate", action: #selector(zoomIn), help: "放大预览")
+        let invertButton = imageButton(invertIcon(), action: #selector(toggleInvertImage), help: "一键反相当前图片，导出保持反相效果")
+        let loupeButton = imageButton(loupeIcon(), action: #selector(toggleMagnifier), help: "开启或关闭拖动红框时的放大镜，快捷键 D")
+
+        let rotateActions = NSStackView(views: [
+            rotateImageLeftButton,
+            rotateImageRightButton,
+            rotateLeftButton,
+            rotateRightButton
+        ])
+        rotateActions.orientation = .horizontal
+        rotateActions.alignment = .centerY
+        rotateActions.spacing = 6
+        let zoomActions = NSStackView(views: [zoomOutButton, resetZoomButton, zoomInButton])
+        zoomActions.orientation = .horizontal
+        zoomActions.alignment = .centerY
+        zoomActions.spacing = 6
+        let viewActions = NSStackView(views: [applyButton, loupeButton, invertButton])
+        viewActions.orientation = .horizontal
+        viewActions.alignment = .centerY
+        viewActions.spacing = 6
+
+        let fileTitle = label("文件操作", size: 11, weight: .semibold)
+        let toolsTitle = label("画面与选框", size: 11, weight: .semibold)
+        let fileSection = NSStackView(views: [fileTitle, fileActions])
+        fileSection.orientation = .vertical
+        fileSection.alignment = .leading
+        fileSection.spacing = 6
+        fileSection.translatesAutoresizingMaskIntoConstraints = false
+
+        let toolsSection = NSStackView(views: [
+            toolsTitle,
+            identifyButton,
+            rotateActions,
+            zoomActions,
+            viewActions
+        ])
+        toolsSection.orientation = .vertical
+        toolsSection.alignment = .leading
+        toolsSection.spacing = 8
+        toolsSection.translatesAutoresizingMaskIntoConstraints = false
+
         let title = label("任务列表", size: 13, weight: .semibold)
         let taskCount = label("0", size: 10, weight: .medium, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         taskCount.identifier = NSUserInterfaceItemIdentifier("taskCountLabel")
@@ -708,107 +807,30 @@ final class LegacyWindowController: NSViewController {
         taskListScroll.drawsBackground = false
         taskListScroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let importButton = imageButton(importIcon(), action: #selector(importFile), help: "导入图片文件或文件夹")
-        let openFolderButton = imageButton(revealIcon(), action: #selector(openCurrentImageFolder), help: "打开当前图片所在文件夹")
-        let fileActions = NSStackView(views: [importButton, openFolderButton])
-        fileActions.orientation = .horizontal
-        fileActions.alignment = .centerY
-        fileActions.spacing = 6
-
-        let identifyButton = imageButton(magicWandIcon(), action: #selector(autoIdentify), help: "自动识别当前任务画面")
-        let applyButton = applyAllButton()
-        let rotateLeftButton = arrowButton("↶", action: #selector(rotateSelectedCropLeft), help: "当前选中红框向左旋转 0.5 度")
-        let rotateRightButton = arrowButton("↷", action: #selector(rotateSelectedCropRight), help: "当前选中红框向右旋转 0.5 度")
-        let rotateImageLeftButton = arrowButton("⟲", action: #selector(rotateImageLeft), help: "整张图片向左旋转 90 度，导出方向与预览一致")
-        let rotateImageRightButton = arrowButton("⟳", action: #selector(rotateImageRight), help: "整张图片向右旋转 90 度，导出方向与预览一致")
-        let zoomOutButton = iconButton("NSExitFullScreenTemplate", action: #selector(zoomOut), help: "缩小预览")
-        let resetZoomButton = smallButton("100%", action: #selector(resetZoom))
-        resetZoomButton.toolTip = "恢复 100% 预览"
-        let zoomInButton = iconButton("NSEnterFullScreenTemplate", action: #selector(zoomIn), help: "放大预览")
-        let invertButton = imageButton(invertIcon(), action: #selector(toggleInvertImage), help: "一键反相当前图片，导出保持反相效果")
-        let loupeButton = imageButton(loupeIcon(), action: #selector(toggleMagnifier), help: "开启或关闭拖动红框时的放大镜，快捷键 D")
-
-        let recognitionActions = NSStackView(views: [identifyButton, applyButton])
-        recognitionActions.orientation = .horizontal
-        recognitionActions.alignment = .centerY
-        recognitionActions.spacing = 6
-        let rotateActions = NSStackView(views: [rotateLeftButton, rotateRightButton])
-        rotateActions.orientation = .horizontal
-        rotateActions.alignment = .centerY
-        rotateActions.spacing = 6
-        let imageRotateActions = NSStackView(views: [rotateImageLeftButton, rotateImageRightButton])
-        imageRotateActions.orientation = .horizontal
-        imageRotateActions.alignment = .centerY
-        imageRotateActions.spacing = 6
-        let zoomActions = NSStackView(views: [zoomOutButton, resetZoomButton, zoomInButton])
-        zoomActions.orientation = .horizontal
-        zoomActions.alignment = .centerY
-        zoomActions.spacing = 6
-        let viewActions = NSStackView(views: [invertButton, loupeButton])
-        viewActions.orientation = .horizontal
-        viewActions.alignment = .centerY
-        viewActions.spacing = 6
-
-        photoPopup.translatesAutoresizingMaskIntoConstraints = false
-        fileNameLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        fileNameLabel.textColor = NSColor(calibratedWhite: 0.9, alpha: 1)
-        fileNameLabel.lineBreakMode = .byTruncatingMiddle
-
-        let fileTitle = label("文件操作", size: 11, weight: .semibold)
-        let toolsTitle = label("画面与选框", size: 11, weight: .semibold)
-        let currentTitle = label("当前图片", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
-        let fileSection = NSStackView(views: [fileTitle, fileActions])
-        fileSection.orientation = .vertical
-        fileSection.alignment = .leading
-        fileSection.spacing = 6
-        fileSection.translatesAutoresizingMaskIntoConstraints = false
-
-        let toolGrid = NSGridView(views: [
-            [recognitionActions, imageRotateActions],
-            [rotateActions, zoomActions],
-            [viewActions, NSView()]
-        ])
-        toolGrid.rowSpacing = 6
-        toolGrid.columnSpacing = 8
-        toolGrid.translatesAutoresizingMaskIntoConstraints = false
-        let toolsSection = NSStackView(views: [
-            toolsTitle,
-            currentTitle,
-            photoPopup,
-            fileNameLabel,
-            toolGrid
-        ])
-        toolsSection.orientation = .vertical
-        toolsSection.alignment = .leading
-        toolsSection.spacing = 6
-        toolsSection.translatesAutoresizingMaskIntoConstraints = false
-
-        for item in [titleRow, taskListScroll, fileSection, toolsSection] {
+        for item in [fileSection, toolsSection, titleRow, taskListScroll] {
             item.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(item)
         }
         NSLayoutConstraint.activate([
+            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
+            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
+            fileSection.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+
+            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
+            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
+            toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 14),
+            identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor),
+
             titleRow.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
             titleRow.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            titleRow.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+            titleRow.topAnchor.constraint(equalTo: toolsSection.bottomAnchor, constant: 16),
 
             taskListScroll.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
             taskListScroll.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
             taskListScroll.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 8),
-            taskListScroll.bottomAnchor.constraint(equalTo: fileSection.topAnchor, constant: -10),
+            taskListScroll.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
             taskListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor),
-
-            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            fileSection.bottomAnchor.constraint(equalTo: toolsSection.topAnchor, constant: -12),
-
-            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            toolsSection.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -12),
-            photoPopup.widthAnchor.constraint(equalTo: toolsSection.widthAnchor),
-            fileNameLabel.widthAnchor.constraint(equalTo: toolsSection.widthAnchor),
-            toolGrid.widthAnchor.constraint(lessThanOrEqualTo: toolsSection.widthAnchor)
+            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor)
         ])
         rebuildTaskList()
         return box
@@ -818,10 +840,8 @@ final class LegacyWindowController: NSViewController {
         let box = panel()
         let title = label("参数设置", size: 15, weight: .bold)
         let add = iconButton("NSAddTemplate", action: #selector(addBox), help: "新增红框")
-        let identify = imageButton(magicWandIcon(), action: #selector(autoIdentify), help: "自动识别")
-        let apply = applyAllButton(compact: true)
-        let clearCrops = iconButton("NSTrashFull", action: #selector(clearCurrentCrops), help: "清除当前图片所有红框")
-        let toolRow = NSStackView(views: [add, identify, apply, clearCrops])
+        let deleteCrop = iconButton("NSTrashFull", action: #selector(deleteCurrentCrop), help: "删除当前选中的红框")
+        let toolRow = NSStackView(views: [add, deleteCrop])
         toolRow.orientation = .horizontal
         toolRow.alignment = .centerY
         toolRow.spacing = 9
@@ -839,15 +859,17 @@ final class LegacyWindowController: NSViewController {
         exportRow.orientation = .horizontal
         exportRow.alignment = .centerY
         exportRow.spacing = 6
-        let zoomRow = NSStackView(views: [
-            iconButton("NSExitFullScreenTemplate", action: #selector(zoomOut), help: "缩小预览"),
-            smallButton("100%", action: #selector(resetZoom)),
-            iconButton("NSEnterFullScreenTemplate", action: #selector(zoomIn), help: "放大预览")
-        ])
-        zoomRow.orientation = .horizontal
-        zoomRow.spacing = 6
         formatPopup.translatesAutoresizingMaskIntoConstraints = false
-        algorithmPopup.translatesAutoresizingMaskIntoConstraints = false
+        algorithmListStack.orientation = .vertical
+        algorithmListStack.alignment = .leading
+        algorithmListStack.spacing = 5
+        algorithmListStack.translatesAutoresizingMaskIntoConstraints = false
+        algorithmListScroll.documentView = algorithmListStack
+        algorithmListScroll.hasVerticalScroller = true
+        algorithmListScroll.hasHorizontalScroller = false
+        algorithmListScroll.autohidesScrollers = true
+        algorithmListScroll.drawsBackground = false
+        algorithmListScroll.translatesAutoresizingMaskIntoConstraints = false
         fffParsingCheckbox.font = NSFont.systemFont(ofSize: 12)
         fffParsingCheckbox.contentTintColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         dustRemovalCheckbox.font = NSFont.systemFont(ofSize: 12)
@@ -866,7 +888,7 @@ final class LegacyWindowController: NSViewController {
         detectionReportLabel.font = NSFont(name: "Menlo", size: 10) ?? NSFont.systemFont(ofSize: 10)
         detectionReportLabel.maximumNumberOfLines = 6
         detectionReportLabel.lineBreakMode = .byWordWrapping
-        let shortcutLabel = label("快捷键：A 新增红框 · S/Delete 删除当前红框 · D 放大镜 · 鼠标滚轮缩放", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
+        let shortcutLabel = label("快捷键：方向键移动全部红框 · A 新增 · S/Delete 删除 · D 放大镜 · 滚轮缩放", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
         shortcutLabel.maximumNumberOfLines = 4
         shortcutLabel.lineBreakMode = .byWordWrapping
         let stack = NSStackView(views: [
@@ -876,10 +898,8 @@ final class LegacyWindowController: NSViewController {
             toolRow,
             label("统一微调", size: 12, weight: .semibold),
             nudgeRow,
-            label("预览缩放", size: 12, weight: .semibold),
-            zoomRow,
             label("算法结果", size: 12, weight: .semibold),
-            algorithmPopup,
+            algorithmListScroll,
             label("导出格式", size: 12, weight: .semibold),
             fffParsingCheckbox,
             formatPopup,
@@ -888,24 +908,23 @@ final class LegacyWindowController: NSViewController {
             exportRow,
             outputLabel,
             separator(),
-            detectionReportLabel,
-            separator(),
             shortcutLabel,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
+        stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
         box.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
             stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
             stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
-            algorithmPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmListScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 145),
+            algorithmListStack.widthAnchor.constraint(equalTo: algorithmListScroll.contentView.widthAnchor),
             formatPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
             dustStrengthSlider.widthAnchor.constraint(equalTo: stack.widthAnchor),
             exportRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            detectionReportLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         return box
@@ -1129,31 +1148,52 @@ final class LegacyWindowController: NSViewController {
     }
 
     private func rebuildAlgorithmPopup(for photo: LegacyPhoto?) {
-        algorithmPopup.removeAllItems()
+        for subview in algorithmListStack.arrangedSubviews {
+            algorithmListStack.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
         guard let photo,
               let candidates = detectionCandidatesByPhotoPath[photoKey(photo.url)],
               !candidates.isEmpty else {
-            algorithmPopup.addItem(withTitle: "未生成候选")
-            algorithmPopup.isEnabled = false
+            let empty = label("等待自动识别", size: 10, color: NSColor(calibratedWhite: 0.55, alpha: 1))
+            empty.alignment = .center
+            algorithmListStack.addArrangedSubview(empty)
+            empty.widthAnchor.constraint(equalTo: algorithmListStack.widthAnchor).isActive = true
+            empty.heightAnchor.constraint(equalToConstant: 46).isActive = true
             detectionReportLabel.stringValue = "算法候选：等待识别"
             return
         }
-        let titles = candidates.enumerated().map { index, candidate in
-            "\(index + 1). \(candidate.title) · \(candidate.rects.count)张 · \(Int(candidate.score * 100))%"
+        let key = photoKey(photo.url)
+        let selectedIndex = min(selectedAlgorithmIndexByPhotoPath[key] ?? 0, candidates.count - 1)
+        selectedAlgorithmIndexByPhotoPath[key] = selectedIndex
+        for (index, candidate) in candidates.enumerated() {
+            let button = NSButton(
+                title: "\(candidate.title)\n\(candidate.rects.count) 张 · 可信度 \(Int(candidate.score * 100))%",
+                target: self,
+                action: #selector(algorithmCandidateSelected(_:))
+            )
+            button.tag = index
+            button.setButtonType(.radio)
+            button.state = index == selectedIndex ? .on : .off
+            button.alignment = .left
+            button.font = NSFont.systemFont(ofSize: 10, weight: index == selectedIndex ? .semibold : .regular)
+            button.toolTip = candidate.detail
+            button.translatesAutoresizingMaskIntoConstraints = false
+            algorithmListStack.addArrangedSubview(button)
+            button.widthAnchor.constraint(equalTo: algorithmListStack.widthAnchor).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 42).isActive = true
         }
-        algorithmPopup.addItems(withTitles: titles)
-        algorithmPopup.isEnabled = true
-        algorithmPopup.selectItem(at: 0)
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: [], candidates: candidates).reportText
     }
 
-    @objc private func algorithmSelectionChanged() {
+    @objc private func algorithmCandidateSelected(_ sender: NSButton) {
         guard tasks.indices.contains(selectedTaskIndex),
               tasks[selectedTaskIndex].photos.indices.contains(selectedPhotoIndex) else { return }
         let photo = tasks[selectedTaskIndex].photos[selectedPhotoIndex]
         guard let candidates = detectionCandidatesByPhotoPath[photoKey(photo.url)],
-              candidates.indices.contains(algorithmPopup.indexOfSelectedItem) else { return }
-        let candidate = candidates[algorithmPopup.indexOfSelectedItem]
+              candidates.indices.contains(sender.tag) else { return }
+        selectedAlgorithmIndexByPhotoPath[photoKey(photo.url)] = sender.tag
+        let candidate = candidates[sender.tag]
         guard let template = Self.currentFixedTemplate(from: canvas.crops, fallback: templateRect ?? canvas.currentTemplateRect) else {
             statusLabel.stringValue = "需要先有一个参考红框尺寸。"
             return
@@ -1167,6 +1207,7 @@ final class LegacyWindowController: NSViewController {
         templateRect = crops.sortedForReadingOrder().first?.rect ?? template
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: crops, candidates: candidates).reportText
         statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。红框尺寸沿用第一框。"
+        rebuildAlgorithmPopup(for: tasks[selectedTaskIndex].photos[selectedPhotoIndex])
         refreshSummary()
     }
 
@@ -1602,6 +1643,13 @@ final class LegacyWindowController: NSViewController {
         refreshSummary()
     }
 
+    @objc private func deleteCurrentCrop() {
+        canvas.deleteSelectedCrop()
+        saveCurrentCrops()
+        statusLabel.stringValue = "已删除当前选中的红框。"
+        refreshSummary()
+    }
+
     @objc private func clearCurrentCrops() {
         canvas.crops.removeAll()
         canvas.selectedIndex = nil
@@ -1813,6 +1861,7 @@ final class LegacyCanvasView: NSView {
     var onCropsChanged: (() -> Void)?
     var onFileDropped: (([URL]) -> Void)?
     var onMagnifierToggled: ((Bool) -> Void)?
+    var onNudgeAll: ((CGFloat, CGFloat) -> Void)?
     var zoom: CGFloat = 1 {
         didSet {
             if !suppressZoomRedraw {
@@ -2021,6 +2070,22 @@ final class LegacyCanvasView: NSView {
 
     override func keyDown(with event: NSEvent) {
         let key = event.charactersIgnoringModifiers?.lowercased()
+        switch event.keyCode {
+        case 123:
+            onNudgeAll?(-0.001, 0)
+            return
+        case 124:
+            onNudgeAll?(0.001, 0)
+            return
+        case 125:
+            onNudgeAll?(0, -0.001)
+            return
+        case 126:
+            onNudgeAll?(0, 0.001)
+            return
+        default:
+            break
+        }
         if key == "d" {
             isMagnifierEnabled.toggle()
             onMagnifierToggled?(isMagnifierEnabled)
@@ -2037,10 +2102,10 @@ final class LegacyCanvasView: NSView {
         }
     }
 
-    private func deleteSelectedCrop() {
-        guard let selectedIndex, crops.indices.contains(selectedIndex), crops.count > 1 else { return }
+    func deleteSelectedCrop() {
+        guard let selectedIndex, crops.indices.contains(selectedIndex) else { return }
         crops.remove(at: selectedIndex)
-        self.selectedIndex = crops.indices.contains(selectedIndex) ? selectedIndex : crops.indices.last
+        self.selectedIndex = crops.isEmpty ? nil : (crops.indices.contains(selectedIndex) ? selectedIndex : crops.indices.last)
         onCropsChanged?()
         needsDisplay = true
     }
