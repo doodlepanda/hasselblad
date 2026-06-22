@@ -1313,6 +1313,8 @@ struct ImageProcessor: Sendable {
         let repairRadius = strength >= 85 ? 2 : 1
         let chromaLimit = Int(max(18, 34 - strength * 0.12))
         let textureLimit = Int(max(18, 36 - strength * 0.10))
+        let softBrightFloor = Int(max(118, 156 - strength * 0.28))
+        let softContrastThreshold = Int(max(8, 21 - strength * 0.20))
 
         var luma = [UInt8](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
@@ -1325,13 +1327,20 @@ struct ImageProcessor: Sendable {
         let integral = integralImage(values: luma.map(UInt32.init), width: width, height: height)
 
         var candidates = [Bool](repeating: false, count: pixelCount)
+        var subtleCandidates = [Bool](repeating: false, count: pixelCount)
+        var smoothBackgroundCandidates = [Bool](repeating: false, count: pixelCount)
+        var ridgeCandidates = [Bool](repeating: false, count: pixelCount)
+        var texturedCurveCandidates = [Bool](repeating: false, count: pixelCount)
         if width > 2, height > 2 {
             for y in 1..<(height - 1) {
                 let row = y * width
                 for x in 1..<(width - 1) {
                     let index = row + x
                     let value = Int(luma[index])
-                    guard value >= Int(brightFloor) else { continue }
+                    guard value >= softBrightFloor else { continue }
+                    let background = localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)
+                    let contrast = value - Int(background)
+                    guard contrast >= softContrastThreshold else { continue }
                     let offset = index * bytesPerPixel
                     let red = Int(pixels[offset])
                     let green = Int(pixels[offset + 1])
@@ -1339,23 +1348,108 @@ struct ImageProcessor: Sendable {
                     let channelMax = max(red, max(green, blue))
                     let channelMin = min(red, min(green, blue))
                     let isNeutralBright = channelMax - channelMin <= chromaLimit || channelMin >= 242
-                    guard isNeutralBright else { continue }
                     let texture = localTexture(luma: luma, width: width, height: height, x: x, y: y)
-                    guard texture <= textureLimit || (channelMin >= 248 && texture <= textureLimit + 10) else { continue }
-                    let background = localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)
-                    if value - Int(background) >= contrastThreshold {
-                        candidates[index] = true
+                    if value >= Int(brightFloor), contrast >= contrastThreshold, isNeutralBright {
+                        let isHardWhiteDefect = channelMin >= 248 && contrast >= contrastThreshold + 8
+                        let isStrongNeutralDefect = channelMin >= 180
+                            && channelMax - channelMin <= chromaLimit
+                            && contrast >= contrastThreshold + 28
+                        if texture <= textureLimit
+                            || (isHardWhiteDefect && texture <= max(textureLimit + 34, 58))
+                            || (isStrongNeutralDefect && texture <= max(textureLimit + 80, 112)) {
+                            candidates[index] = true
+                        }
+                    }
+                    if let lift = localAdditiveRGBLift8(pixels: pixels, width: width, height: height, x: x, y: y),
+                       lift.minimum >= softContrastThreshold,
+                       lift.spread <= max(10, lift.minimum / 2 + 5) {
+                        let isStrongAdditiveWhite = lift.minimum >= softContrastThreshold + 20 && lift.spread <= 8
+                        if texture <= max(46, textureLimit + 14) || (isStrongAdditiveWhite && texture <= 120) {
+                            subtleCandidates[index] = true
+                        }
+                    }
+                    let backgroundTexture = localBackgroundTexture(luma: luma, width: width, height: height, x: x, y: y)
+                    let wideBackground = localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 9, innerRadius: 3)
+                    let wideContrast = value - Int(wideBackground)
+                    if backgroundTexture <= 28,
+                       wideContrast >= 3,
+                       value >= 100 {
+                        smoothBackgroundCandidates[index] = true
+                    }
+                    if x >= 3, y >= 3, x < width - 3, y < height - 3,
+                       directionalBrightRidge(luma: luma, width: width, height: height, x: x, y: y) >= 5 {
+                        let ridge = directionalBrightRidge(luma: luma, width: width, height: height, x: x, y: y)
+                        if backgroundTexture <= 40 {
+                            ridgeCandidates[index] = true
+                        }
+                        if ridge >= 12,
+                           let lift = localAdditiveRGBLift8(pixels: pixels, width: width, height: height, x: x, y: y),
+                           lift.minimum >= 8,
+                           lift.spread <= 15 {
+                            texturedCurveCandidates[index] = true
+                        }
                     }
                 }
             }
         }
 
         var mask = filteredDustMask(candidates: candidates, width: width, height: height, maxSpotArea: maxSpotArea, maxLineLength: maxLineLength, slenderLimit: slenderLimit)
+        let subtleMask = filteredDustMask(
+            candidates: subtleCandidates,
+            width: width,
+            height: height,
+            maxSpotArea: min(maxSpotArea, 10),
+            maxLineLength: min(maxLineLength, 110),
+            slenderLimit: min(slenderLimit, 2)
+        )
+        for index in mask.indices where subtleMask[index] {
+            mask[index] = true
+        }
+        let bridgedSmoothCandidates = bridgedDustCandidates(smoothBackgroundCandidates, width: width, height: height)
+        let smoothMask = filteredDustMask(
+            candidates: bridgedSmoothCandidates,
+            width: width,
+            height: height,
+            maxSpotArea: 0,
+            maxLineLength: min(maxLineLength, 220),
+            slenderLimit: 4,
+            minimumScratchLength: 5,
+            allowSparseCurves: true
+        )
+        for index in mask.indices where smoothMask[index] {
+            mask[index] = true
+        }
+        let ridgeMask = filteredDustMask(
+            candidates: bridgedDustCandidates(ridgeCandidates, width: width, height: height),
+            width: width,
+            height: height,
+            maxSpotArea: 12,
+            maxLineLength: min(maxLineLength, 300),
+            slenderLimit: 5,
+            minimumScratchLength: 4,
+            allowSparseCurves: true
+        )
+        for index in mask.indices where ridgeMask[index] {
+            mask[index] = true
+        }
+        let texturedCurveMask = filteredDustMask(
+            candidates: bridgedDustCandidates(texturedCurveCandidates, width: width, height: height),
+            width: width,
+            height: height,
+            maxSpotArea: 0,
+            maxLineLength: min(maxLineLength, 260),
+            slenderLimit: 0,
+            minimumScratchLength: 8,
+            allowSparseCurves: true
+        )
+        for index in mask.indices where texturedCurveMask[index] {
+            mask[index] = true
+        }
         if strength >= 95 {
             mask = dilatedDustMask(mask, width: width, height: height)
         }
 
-        dustDebug("8bit dust candidates=\(candidates.filter { $0 }.count) mask=\(mask.filter { $0 }.count) size=\(width)x\(height)")
+        dustDebug("8bit dust candidates=\(candidates.filter { $0 }.count) subtle=\(subtleCandidates.filter { $0 }.count) smooth=\(smoothBackgroundCandidates.filter { $0 }.count) ridge=\(ridgeCandidates.filter { $0 }.count) mask=\(mask.filter { $0 }.count) size=\(width)x\(height)")
         guard mask.contains(true) else { return image }
         repairDustPixels(pixels: &pixels, mask: mask, width: width, height: height, radius: repairRadius)
 
@@ -1401,6 +1495,8 @@ struct ImageProcessor: Sendable {
         let repairRadius = strength >= 85 ? 2 : 1
         let chromaLimit = UInt16(max(18, 34 - strength * 0.12) * 257)
         let textureLimit = UInt16(max(18, 36 - strength * 0.10) * 257)
+        let softBrightFloor = UInt16(max(118, 156 - strength * 0.28) * 257)
+        let softContrastThreshold = UInt16(max(8, 21 - strength * 0.20) * 257)
 
         var luma = [UInt16](repeating: 0, count: pixelCount)
         for index in 0..<pixelCount {
@@ -1413,13 +1509,21 @@ struct ImageProcessor: Sendable {
         let integral = integralImage(values: luma.map(UInt32.init), width: width, height: height)
 
         var candidates = [Bool](repeating: false, count: pixelCount)
+        var subtleCandidates = [Bool](repeating: false, count: pixelCount)
+        var smoothBackgroundCandidates = [Bool](repeating: false, count: pixelCount)
+        var ridgeCandidates = [Bool](repeating: false, count: pixelCount)
+        var texturedCurveCandidates = [Bool](repeating: false, count: pixelCount)
         if width > 2, height > 2 {
             for y in 1..<(height - 1) {
                 let row = y * width
                 for x in 1..<(width - 1) {
                     let index = row + x
                     let value = luma[index]
-                    guard value >= brightFloor else { continue }
+                    guard value >= softBrightFloor else { continue }
+                    let background = UInt16(min(65535, localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)))
+                    guard value > background else { continue }
+                    let contrast = value - background
+                    guard contrast >= softContrastThreshold else { continue }
                     let offset = index * bytesPerPixel
                     let red = readUInt16(pixels, offset: offset, littleEndian: littleEndian)
                     let green = readUInt16(pixels, offset: offset + 2, littleEndian: littleEndian)
@@ -1427,23 +1531,108 @@ struct ImageProcessor: Sendable {
                     let channelMax = max(red, max(green, blue))
                     let channelMin = min(red, min(green, blue))
                     let isNeutralBright = channelMax - channelMin <= chromaLimit || channelMin >= 62194
-                    guard isNeutralBright else { continue }
                     let texture = localTexture(luma: luma, width: width, height: height, x: x, y: y)
-                    guard texture <= textureLimit || (channelMin >= 63736 && texture <= textureLimit + 2570) else { continue }
-                    let background = UInt16(min(65535, localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 5, innerRadius: 1)))
-                    if value > background, value - background >= contrastThreshold {
-                        candidates[index] = true
+                    if value >= brightFloor, contrast >= contrastThreshold, isNeutralBright {
+                        let isHardWhiteDefect = channelMin >= 63736 && contrast >= contrastThreshold + 2056
+                        let isStrongNeutralDefect = channelMin >= 46260
+                            && channelMax - channelMin <= chromaLimit
+                            && contrast >= contrastThreshold + 7196
+                        if texture <= textureLimit
+                            || (isHardWhiteDefect && texture <= max(textureLimit + 8738, 14906))
+                            || (isStrongNeutralDefect && texture <= max(textureLimit + 20560, 28784)) {
+                            candidates[index] = true
+                        }
+                    }
+                    if let lift = localAdditiveRGBLift16(pixels: pixels, width: width, height: height, x: x, y: y, littleEndian: littleEndian),
+                       lift.minimum >= softContrastThreshold,
+                       lift.spread <= max(2570, lift.minimum / 2 + 1285) {
+                        let isStrongAdditiveWhite = lift.minimum >= softContrastThreshold + 5140 && lift.spread <= 2056
+                        if texture <= max(11822, textureLimit + 3598) || (isStrongAdditiveWhite && texture <= 30840) {
+                            subtleCandidates[index] = true
+                        }
+                    }
+                    let backgroundTexture = localBackgroundTexture(luma: luma, width: width, height: height, x: x, y: y)
+                    let wideBackground = UInt16(min(65535, localRingAverage(integral: integral, width: width, height: height, x: x, y: y, outerRadius: 9, innerRadius: 3)))
+                    let wideContrast = value > wideBackground ? value - wideBackground : 0
+                    if backgroundTexture <= 7196,
+                       wideContrast >= 771,
+                       value >= 25700 {
+                        smoothBackgroundCandidates[index] = true
+                    }
+                    if x >= 3, y >= 3, x < width - 3, y < height - 3,
+                       directionalBrightRidge(luma: luma, width: width, height: height, x: x, y: y) >= 1285 {
+                        let ridge = directionalBrightRidge(luma: luma, width: width, height: height, x: x, y: y)
+                        if backgroundTexture <= 10280 {
+                            ridgeCandidates[index] = true
+                        }
+                        if ridge >= 3084,
+                           let lift = localAdditiveRGBLift16(pixels: pixels, width: width, height: height, x: x, y: y, littleEndian: littleEndian),
+                           lift.minimum >= 2056,
+                           lift.spread <= 3855 {
+                            texturedCurveCandidates[index] = true
+                        }
                     }
                 }
             }
         }
 
         var mask = filteredDustMask(candidates: candidates, width: width, height: height, maxSpotArea: maxSpotArea, maxLineLength: maxLineLength, slenderLimit: slenderLimit)
+        let subtleMask = filteredDustMask(
+            candidates: subtleCandidates,
+            width: width,
+            height: height,
+            maxSpotArea: min(maxSpotArea, 10),
+            maxLineLength: min(maxLineLength, 110),
+            slenderLimit: min(slenderLimit, 2)
+        )
+        for index in mask.indices where subtleMask[index] {
+            mask[index] = true
+        }
+        let bridgedSmoothCandidates = bridgedDustCandidates(smoothBackgroundCandidates, width: width, height: height)
+        let smoothMask = filteredDustMask(
+            candidates: bridgedSmoothCandidates,
+            width: width,
+            height: height,
+            maxSpotArea: 0,
+            maxLineLength: min(maxLineLength, 220),
+            slenderLimit: 4,
+            minimumScratchLength: 5,
+            allowSparseCurves: true
+        )
+        for index in mask.indices where smoothMask[index] {
+            mask[index] = true
+        }
+        let ridgeMask = filteredDustMask(
+            candidates: bridgedDustCandidates(ridgeCandidates, width: width, height: height),
+            width: width,
+            height: height,
+            maxSpotArea: 12,
+            maxLineLength: min(maxLineLength, 300),
+            slenderLimit: 5,
+            minimumScratchLength: 4,
+            allowSparseCurves: true
+        )
+        for index in mask.indices where ridgeMask[index] {
+            mask[index] = true
+        }
+        let texturedCurveMask = filteredDustMask(
+            candidates: bridgedDustCandidates(texturedCurveCandidates, width: width, height: height),
+            width: width,
+            height: height,
+            maxSpotArea: 0,
+            maxLineLength: min(maxLineLength, 260),
+            slenderLimit: 0,
+            minimumScratchLength: 8,
+            allowSparseCurves: true
+        )
+        for index in mask.indices where texturedCurveMask[index] {
+            mask[index] = true
+        }
         if strength >= 95 {
             mask = dilatedDustMask(mask, width: width, height: height)
         }
 
-        dustDebug("16bit dust candidates=\(candidates.filter { $0 }.count) mask=\(mask.filter { $0 }.count) size=\(width)x\(height)")
+        dustDebug("16bit dust candidates=\(candidates.filter { $0 }.count) subtle=\(subtleCandidates.filter { $0 }.count) smooth=\(smoothBackgroundCandidates.filter { $0 }.count) ridge=\(ridgeCandidates.filter { $0 }.count) mask=\(mask.filter { $0 }.count) size=\(width)x\(height)")
         guard mask.contains(true) else { return image }
         repair16BitDustPixels(pixels: &pixels, mask: mask, width: width, height: height, radius: repairRadius, littleEndian: littleEndian)
 
@@ -1497,7 +1686,7 @@ struct ImageProcessor: Sendable {
         return pixels
     }
 
-    private func filteredDustMask(candidates: [Bool], width: Int, height: Int, maxSpotArea: Int, maxLineLength: Int, slenderLimit: Int) -> [Bool] {
+    private func filteredDustMask(candidates: [Bool], width: Int, height: Int, maxSpotArea: Int, maxLineLength: Int, slenderLimit: Int, minimumScratchLength: Int = 1, allowSparseCurves: Bool = false) -> [Bool] {
         var visited = [Bool](repeating: false, count: candidates.count)
         var mask = [Bool](repeating: false, count: candidates.count)
         var queue: [Int] = []
@@ -1542,8 +1731,17 @@ struct ImageProcessor: Sendable {
             let shortest = min(componentWidth, componentHeight)
             let isSmallSpot = component.count <= maxSpotArea
             let linePixelLimit = maxSpotArea * 3 + longest * max(2, slenderLimit + 1)
-            let isFineScratch = shortest <= slenderLimit && longest <= maxLineLength && component.count <= linePixelLimit
-            guard isSmallSpot || isFineScratch else { continue }
+            let isFineScratch = shortest <= slenderLimit
+                && longest >= minimumScratchLength
+                && longest <= maxLineLength
+                && component.count <= linePixelLimit
+            let boxArea = componentWidth * componentHeight
+            let isSparseCurve = allowSparseCurves
+                && longest >= minimumScratchLength
+                && longest <= maxLineLength
+                && component.count <= max(12, longest * 5)
+                && component.count * 4 <= boxArea
+            guard isSmallSpot || isFineScratch || isSparseCurve else { continue }
             for index in component {
                 mask[index] = true
             }
@@ -1582,28 +1780,165 @@ struct ImageProcessor: Sendable {
         return UInt32((outerSum - innerSum) / area)
     }
 
-    private func localTexture(luma: [UInt8], width: Int, height: Int, x: Int, y: Int) -> Int {
-        let center = Int(luma[y * width + x])
-        var strongest = 0
-        for yy in max(0, y - 1)...min(height - 1, y + 1) {
-            for xx in max(0, x - 1)...min(width - 1, x + 1) {
-                guard xx != x || yy != y else { continue }
-                strongest = max(strongest, abs(center - Int(luma[yy * width + xx])))
+    private func localAdditiveRGBLift8(pixels: [UInt8], width: Int, height: Int, x: Int, y: Int) -> (minimum: Int, spread: Int)? {
+        var redSum = 0
+        var greenSum = 0
+        var blueSum = 0
+        var count = 0
+        for yy in max(0, y - 3)...min(height - 1, y + 3) {
+            for xx in max(0, x - 3)...min(width - 1, x + 3) {
+                guard abs(xx - x) > 1 || abs(yy - y) > 1 else { continue }
+                let offset = (yy * width + xx) * 4
+                redSum += Int(pixels[offset])
+                greenSum += Int(pixels[offset + 1])
+                blueSum += Int(pixels[offset + 2])
+                count += 1
             }
         }
-        return strongest
+        guard count > 0 else { return nil }
+        let offset = (y * width + x) * 4
+        let lifts = [
+            Int(pixels[offset]) - redSum / count,
+            Int(pixels[offset + 1]) - greenSum / count,
+            Int(pixels[offset + 2]) - blueSum / count
+        ]
+        guard let minimum = lifts.min(), let maximum = lifts.max(), minimum > 0 else { return nil }
+        return (minimum, maximum - minimum)
+    }
+
+    private func localAdditiveRGBLift16(pixels: [UInt8], width: Int, height: Int, x: Int, y: Int, littleEndian: Bool) -> (minimum: UInt16, spread: UInt16)? {
+        var redSum = 0
+        var greenSum = 0
+        var blueSum = 0
+        var count = 0
+        for yy in max(0, y - 3)...min(height - 1, y + 3) {
+            for xx in max(0, x - 3)...min(width - 1, x + 3) {
+                guard abs(xx - x) > 1 || abs(yy - y) > 1 else { continue }
+                let offset = (yy * width + xx) * 6
+                redSum += Int(readUInt16(pixels, offset: offset, littleEndian: littleEndian))
+                greenSum += Int(readUInt16(pixels, offset: offset + 2, littleEndian: littleEndian))
+                blueSum += Int(readUInt16(pixels, offset: offset + 4, littleEndian: littleEndian))
+                count += 1
+            }
+        }
+        guard count > 0 else { return nil }
+        let offset = (y * width + x) * 6
+        let lifts = [
+            Int(readUInt16(pixels, offset: offset, littleEndian: littleEndian)) - redSum / count,
+            Int(readUInt16(pixels, offset: offset + 2, littleEndian: littleEndian)) - greenSum / count,
+            Int(readUInt16(pixels, offset: offset + 4, littleEndian: littleEndian)) - blueSum / count
+        ]
+        guard let minimum = lifts.min(), let maximum = lifts.max(), minimum > 0 else { return nil }
+        return (UInt16(min(65535, minimum)), UInt16(min(65535, maximum - minimum)))
+    }
+
+    private func localTexture(luma: [UInt8], width: Int, height: Int, x: Int, y: Int) -> Int {
+        var low = 255
+        var high = 0
+        let radius = 2
+        for yy in max(0, y - radius)...min(height - 1, y + radius) {
+            for xx in max(0, x - radius)...min(width - 1, x + radius) {
+                guard xx != x || yy != y else { continue }
+                let value = Int(luma[yy * width + xx])
+                low = min(low, value)
+                high = max(high, value)
+            }
+        }
+        return high - low
     }
 
     private func localTexture(luma: [UInt16], width: Int, height: Int, x: Int, y: Int) -> UInt16 {
-        let center = Int(luma[y * width + x])
-        var strongest = 0
-        for yy in max(0, y - 1)...min(height - 1, y + 1) {
-            for xx in max(0, x - 1)...min(width - 1, x + 1) {
+        var low = 65535
+        var high = 0
+        let radius = 2
+        for yy in max(0, y - radius)...min(height - 1, y + radius) {
+            for xx in max(0, x - radius)...min(width - 1, x + radius) {
                 guard xx != x || yy != y else { continue }
-                strongest = max(strongest, abs(center - Int(luma[yy * width + xx])))
+                let value = Int(luma[yy * width + xx])
+                low = min(low, value)
+                high = max(high, value)
             }
         }
-        return UInt16(min(65535, strongest))
+        return UInt16(min(65535, high - low))
+    }
+
+    private func localBackgroundTexture(luma: [UInt8], width: Int, height: Int, x: Int, y: Int) -> Int {
+        var low = 255
+        var high = 0
+        for yy in max(0, y - 4)...min(height - 1, y + 4) {
+            for xx in max(0, x - 4)...min(width - 1, x + 4) {
+                guard abs(xx - x) > 2 || abs(yy - y) > 2 else { continue }
+                let value = Int(luma[yy * width + xx])
+                low = min(low, value)
+                high = max(high, value)
+            }
+        }
+        return high - low
+    }
+
+    private func localBackgroundTexture(luma: [UInt16], width: Int, height: Int, x: Int, y: Int) -> UInt16 {
+        var low = 65535
+        var high = 0
+        for yy in max(0, y - 4)...min(height - 1, y + 4) {
+            for xx in max(0, x - 4)...min(width - 1, x + 4) {
+                guard abs(xx - x) > 2 || abs(yy - y) > 2 else { continue }
+                let value = Int(luma[yy * width + xx])
+                low = min(low, value)
+                high = max(high, value)
+            }
+        }
+        return UInt16(min(65535, high - low))
+    }
+
+    private func directionalBrightRidge(luma: [UInt8], width: Int, height: Int, x: Int, y: Int) -> Int {
+        let center = Int(luma[y * width + x])
+        let directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        var best = 0
+        for (dx, dy) in directions {
+            let negative = (Int(luma[(y - dy * 2) * width + x - dx * 2]) + Int(luma[(y - dy * 3) * width + x - dx * 3])) / 2
+            let positive = (Int(luma[(y + dy * 2) * width + x + dx * 2]) + Int(luma[(y + dy * 3) * width + x + dx * 3])) / 2
+            guard abs(negative - positive) <= 18 else { continue }
+            best = max(best, center - max(negative, positive))
+        }
+        return best
+    }
+
+    private func directionalBrightRidge(luma: [UInt16], width: Int, height: Int, x: Int, y: Int) -> UInt16 {
+        let center = Int(luma[y * width + x])
+        let directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        var best = 0
+        for (dx, dy) in directions {
+            let negative = (Int(luma[(y - dy * 2) * width + x - dx * 2]) + Int(luma[(y - dy * 3) * width + x - dx * 3])) / 2
+            let positive = (Int(luma[(y + dy * 2) * width + x + dx * 2]) + Int(luma[(y + dy * 3) * width + x + dx * 3])) / 2
+            guard abs(negative - positive) <= 4626 else { continue }
+            best = max(best, center - max(negative, positive))
+        }
+        return UInt16(min(65535, max(0, best)))
+    }
+
+    private func bridgedDustCandidates(_ candidates: [Bool], width: Int, height: Int) -> [Bool] {
+        var result = candidates
+        let directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        guard width > 8, height > 8 else { return result }
+        for y in 4..<(height - 4) {
+            for x in 4..<(width - 4) {
+                let index = y * width + x
+                guard !candidates[index] else { continue }
+                for (dx, dy) in directions {
+                    let hasNegative = (1...3).contains { distance in
+                        candidates[(y - dy * distance) * width + x - dx * distance]
+                    }
+                    let hasPositive = (1...3).contains { distance in
+                        candidates[(y + dy * distance) * width + x + dx * distance]
+                    }
+                    if hasNegative, hasPositive {
+                        result[index] = true
+                        break
+                    }
+                }
+            }
+        }
+        return result
     }
 
     private func rectSum(integral: [UInt64], stride: Int, left: Int, top: Int, right: Int, bottom: Int) -> UInt64 {
@@ -1819,7 +2154,7 @@ struct ImageProcessor: Sendable {
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
             return false
         }
-        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.94] as CFDictionary)
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary)
         return CGImageDestinationFinalize(destination)
     }
 

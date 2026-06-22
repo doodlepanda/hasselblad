@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="ImgSlicer"
 APP_VERSION="0.35.2"
-APP_BUILD="41"
+APP_BUILD="43"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_BASE_NAME="$APP_DISPLAY_NAME-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
@@ -154,6 +154,8 @@ $APP_DISPLAY_NAME $APP_VERSION-$APP_BUILD 版本更新说明
 - DMG：$RELEASE_NAME.dmg
 
 本次更新：
+- JPG 导出质量提升至 ImageIO 最高等级 1.0，显著增大文件体积并减少胶片颗粒、天空、树叶和建筑细节的压缩损失；完全无损仍建议使用 TIF 16-bit。
+- 2x6 固定胶片算法应用结果时，第一行 6 个红框高度会跟随手工调整后的第一个红框高度，便于统一校准第一排裁切。
 - 新增 FFF 测试分支支持：可直接导入哈苏 FlexColor/Flextight 扫描生成的 .fff 文件。
 - FFF 文件不再依赖系统 ImageIO 缩略图，软件会读取 TIFF 容器内的 16bit RGB 主图用于预览、自动识别和导出。
 - FFF 导出 TIF 时保持 16bit 输出，避免只导出 199px 预览图或低位深图片。

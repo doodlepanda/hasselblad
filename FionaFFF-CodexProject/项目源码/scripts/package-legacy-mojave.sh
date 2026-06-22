@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
 APP_VERSION="0.35.2"
-APP_BUILD="65"
+APP_BUILD="68"
 RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -115,9 +115,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-65</string>
+  <string>0.35.2-legacy-68</string>
   <key>CFBundleVersion</key>
-  <string>65</string>
+  <string>68</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>
@@ -161,6 +161,10 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 - DMG：$RELEASE_NAME.dmg
 
 本次更新：
+- JPG 导出质量提升至 ImageIO 最高等级 1.0，显著增大文件体积并减少胶片颗粒、天空、树叶和建筑细节的压缩损失；完全无损仍建议使用 TIF 16-bit。
+- 2x6 固定胶片识别后，全部 12 个红框统一沿用第一个手工调整红框的宽高，算法只负责确定各画面中心位置。
+- 改进除尘算法：支持草地等有色背景上的半透明白色小尘点，并通过小面积和纹理保护减少误伤树叶与画面细节。
+- 增加天空低反差白点、断续细线、弯曲划痕和跨越建筑区域划痕检测，保留窗格、栏杆和建筑纹理。
 - 优化除尘算法：增加白色/低色彩瑕疵判断和局部纹理保护，避免树叶、屋顶纹理、雕花高光被误判后出现涂抹变形。
 - 取消色阶、曲线、白平衡工具入口。
 - 左侧放大镜支持快捷键 D；默认关闭，避免拖动红框时额外绘制造成卡顿。

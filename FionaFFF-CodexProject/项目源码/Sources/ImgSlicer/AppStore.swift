@@ -899,7 +899,12 @@ final class AppStore: ObservableObject {
     }
 
     private func applyCandidate(_ candidate: CropCandidate, taskIndex: Int, photoIndex: Int) {
-        tasks[taskIndex].photos[photoIndex].cropRegions = candidate.adjustedRegions(settings: settings)
+        var regions = candidate.adjustedRegions(settings: settings)
+        if candidate.title.contains("2x6"),
+           let template = templateCropRect?.normalizedCropRect {
+            regions = templateSizedRegions(from: regions, template: template)
+        }
+        tasks[taskIndex].photos[photoIndex].cropRegions = regions
         tasks[taskIndex].photos[photoIndex].selectedCandidateID = candidate.id
         selectedCropRegionID = tasks[taskIndex].photos[photoIndex].cropRegions.first?.id
         tasks[taskIndex].photos[photoIndex].isManual = false
@@ -986,6 +991,32 @@ final class AppStore: ObservableObject {
                 return CropRegion(index: offset + 1, rect: rect, isManual: true)
             }
         return nonOverlappingRegions(regions)
+    }
+
+    private func templateSizedRegions(from regions: [CropRegion], template: CGRect) -> [CropRegion] {
+        let template = template.normalizedCropRect
+        guard regions.count >= 12, template.width > 0, template.height > 0 else { return regions }
+        let ordered = regions.sorted {
+            if abs($0.rect.minY - $1.rect.minY) > 0.045 { return $0.rect.minY < $1.rect.minY }
+            return $0.rect.minX < $1.rect.minX
+        }
+        let adjusted = ordered.map { region -> CropRegion in
+            let rect = region.rect.normalizedCropRect
+            let width = min(max(template.width, 0.001), 1)
+            let height = min(max(template.height, 0.001), 1)
+            let x = min(max(rect.midX - width / 2, 0), max(0, 1 - width))
+            let y = min(max(rect.midY - height / 2, 0), max(0, 1 - height))
+            return CropRegion(
+                id: region.id,
+                index: region.index,
+                rect: CGRect(x: x, y: y, width: width, height: height).normalizedCropRect,
+                angle: region.angle,
+                isManual: region.isManual
+            )
+        }
+        return adjusted.enumerated().map { offset, region in
+            CropRegion(id: region.id, index: offset + 1, rect: region.rect, angle: region.angle, isManual: region.isManual)
+        }
     }
 
     private func nonOverlappingRegions(_ regions: [CropRegion]) -> [CropRegion] {
