@@ -952,7 +952,7 @@ final class LegacyWindowController: NSViewController {
         detectionReportLabel.font = NSFont(name: "Menlo", size: 10) ?? NSFont.systemFont(ofSize: 10)
         detectionReportLabel.maximumNumberOfLines = 6
         detectionReportLabel.lineBreakMode = .byWordWrapping
-        let shortcutLabel = label("快捷键：方向键移动全部红框 · A 新增 · S/Delete 删除 · D 放大镜 · 滚轮缩放", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
+        let shortcutLabel = label("快捷键：方向键移动选中框 · Command＋方向键移动全部框 · A 新增 · S/Delete 删除 · D 放大镜", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
         shortcutLabel.maximumNumberOfLines = 4
         shortcutLabel.lineBreakMode = .byWordWrapping
 
@@ -1161,6 +1161,7 @@ final class LegacyWindowController: NSViewController {
         updateStableButtonColors(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
+        updateExportControlTextColors(textColor)
     }
 
     private func updateSectionTones(in root: NSView) {
@@ -1190,6 +1191,30 @@ final class LegacyWindowController: NSViewController {
                 field.textColor = field.font?.pointSize ?? 12 <= 10.5 ? mutedColor : textColor
             }
             setTextColors(in: subview, textColor: textColor, mutedColor: mutedColor)
+        }
+    }
+
+    private func updateExportControlTextColors(_ color: NSColor) {
+        let checkboxFont = fffParsingCheckbox.font ?? NSFont.systemFont(ofSize: 12)
+        fffParsingCheckbox.contentTintColor = color
+        fffParsingCheckbox.attributedTitle = NSAttributedString(
+            string: fffParsingCheckbox.title,
+            attributes: [.foregroundColor: color, .font: checkboxFont]
+        )
+
+        formatPopup.contentTintColor = color
+        let popupFont = formatPopup.font ?? NSFont.systemFont(ofSize: 12)
+        for item in formatPopup.itemArray {
+            item.attributedTitle = NSAttributedString(
+                string: item.title,
+                attributes: [.foregroundColor: color, .font: popupFont]
+            )
+        }
+        if let selectedTitle = formatPopup.selectedItem?.title {
+            formatPopup.attributedTitle = NSAttributedString(
+                string: selectedTitle,
+                attributes: [.foregroundColor: color, .font: popupFont]
+            )
         }
     }
 
