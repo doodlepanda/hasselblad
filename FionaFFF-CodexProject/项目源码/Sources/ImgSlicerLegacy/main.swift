@@ -348,6 +348,9 @@ final class LegacyWindowController: NSViewController {
     private var tasks: [LegacyTask] = []
     private var selectedTaskIndex = 0
     private var selectedPhotoIndex = 0
+    private var selectedTaskIndexes: Set<Int> = []
+    private var lastTaskSelectionIndex: Int?
+    private var filmstripPhotoRefs: [(taskIndex: Int, photoIndex: Int)] = []
     private var exportDirectory: URL?
     private var templateRect: CGRect?
     private var templateImageAspect: Double?
@@ -1384,6 +1387,8 @@ final class LegacyWindowController: NSViewController {
         guard importedPhotoCount > 0 else { return }
         selectedTaskIndex = tasks.count - 1
         selectedPhotoIndex = 0
+        selectedTaskIndexes = [selectedTaskIndex]
+        lastTaskSelectionIndex = selectedTaskIndex
         if let firstImportedPhoto {
             templateRect = firstImportedPhoto.crops.first?.rect ?? templateRect
             templateImageAspect = cachedImageAspect(url: firstImportedPhoto.url)
@@ -1467,7 +1472,9 @@ final class LegacyWindowController: NSViewController {
             adjustments: photo.adjustments
         )
         fileNameLabel.stringValue = "\(task.name)：\(selectedPhotoIndex + 1) / \(task.photos.count)  \(photo.name)"
-        outputLabel.stringValue = "输出：\(exportDirectory?.path ?? task.rootURL.path)"
+        outputLabel.stringValue = effectiveSelectedTaskIndexes().count > 1
+            ? "输出：分别输出到各任务原文件夹"
+            : "输出：\(exportDirectory?.path ?? task.rootURL.path)"
         photoPopup.selectItem(at: selectedPhotoIndex)
         rebuildAlgorithmPopup(for: photo)
         updateFilmstripSelection()
@@ -1640,7 +1647,7 @@ final class LegacyWindowController: NSViewController {
         }
         for (index, task) in tasks.enumerated() {
             let row = LegacyTaskRowView()
-            row.isSelected = index == selectedTaskIndex
+            row.isSelected = selectedTaskIndexes.contains(index) || index == selectedTaskIndex
             row.isStopped = task.isStopped
             row.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1648,6 +1655,13 @@ final class LegacyWindowController: NSViewController {
             select.tag = index
             select.isBordered = false
             select.translatesAutoresizingMaskIntoConstraints = false
+
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(taskListSelectionChanged(_:)))
+            checkbox.identifier = NSUserInterfaceItemIdentifier("taskSelectionCheckbox")
+            checkbox.tag = index
+            checkbox.state = selectedTaskIndexes.contains(index) ? .on : .off
+            checkbox.toolTip = "勾选任务；Command 点击增减选择，Shift 点击连续多选"
+            checkbox.translatesAutoresizingMaskIntoConstraints = false
 
             let name = NSTextField(labelWithString: task.name)
             name.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
@@ -1666,7 +1680,7 @@ final class LegacyWindowController: NSViewController {
             let remove = iconButton("NSTrashFull", action: #selector(deleteTaskFromList(_:)), help: "删除这个任务")
             remove.tag = index
 
-            for item in [select, name, detail, remove] {
+            for item in [select, checkbox, name, detail, remove] {
                 row.addSubview(item)
             }
             taskListStack.addArrangedSubview(row)
@@ -1677,7 +1691,11 @@ final class LegacyWindowController: NSViewController {
                 select.trailingAnchor.constraint(equalTo: row.trailingAnchor),
                 select.topAnchor.constraint(equalTo: row.topAnchor),
                 select.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-                name.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 9),
+                checkbox.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 7),
+                checkbox.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                checkbox.widthAnchor.constraint(equalToConstant: 18),
+                checkbox.heightAnchor.constraint(equalToConstant: 18),
+                name.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 7),
                 name.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -6),
                 name.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
                 detail.leadingAnchor.constraint(equalTo: name.leadingAnchor),
@@ -1688,6 +1706,7 @@ final class LegacyWindowController: NSViewController {
                 remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
                 remove.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -7)
             ])
+            row.addSubview(checkbox, positioned: .above, relativeTo: select)
             row.addSubview(remove, positioned: .above, relativeTo: select)
         }
         refreshThemeText(in: taskListStack)
@@ -1697,7 +1716,8 @@ final class LegacyWindowController: NSViewController {
         for subview in root.subviews {
             if let field = subview as? NSTextField,
                field.identifier == NSUserInterfaceItemIdentifier("taskCountLabel") {
-                field.stringValue = "\(tasks.count)"
+                let selectedCount = effectiveSelectedTaskIndexes().count
+                field.stringValue = selectedCount > 1 ? "已选 \(selectedCount) / \(tasks.count)" : "\(tasks.count)"
                 return
             }
             updateTaskCountLabel(in: subview)
@@ -1718,76 +1738,85 @@ final class LegacyWindowController: NSViewController {
             filmstripStack.removeArrangedSubview(subview)
             subview.removeFromSuperview()
         }
-        guard let task = selectedTask else { return }
-        for (index, photo) in task.photos.enumerated() {
-            let imageView = NSImageView()
-            imageView.image = NSWorkspace.shared.icon(forFile: photo.url.path)
-            imageView.imageScaling = .scaleProportionallyDown
-            imageView.imageAlignment = .alignCenter
-            imageView.translatesAutoresizingMaskIntoConstraints = false
+        filmstripPhotoRefs = []
+        let taskIndexes = effectiveSelectedTaskIndexes()
+        for taskIndex in taskIndexes {
+            guard tasks.indices.contains(taskIndex) else { continue }
+            let task = tasks[taskIndex]
+            for (photoIndex, photo) in task.photos.enumerated() {
+                let filmstripIndex = filmstripPhotoRefs.count
+                filmstripPhotoRefs.append((taskIndex: taskIndex, photoIndex: photoIndex))
+                let imageView = NSImageView()
+                imageView.image = NSWorkspace.shared.icon(forFile: photo.url.path)
+                imageView.imageScaling = .scaleProportionallyDown
+                imageView.imageAlignment = .alignCenter
+                imageView.translatesAutoresizingMaskIntoConstraints = false
 
-            let titleLabel = NSTextField(labelWithString: photo.name)
-            titleLabel.alignment = .left
-            titleLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-            titleLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
-            titleLabel.lineBreakMode = .byTruncatingMiddle
-            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+                let titleText = taskIndexes.count > 1 ? "\(task.name) · \(photo.name)" : photo.name
+                let titleLabel = NSTextField(labelWithString: titleText)
+                titleLabel.alignment = .left
+                titleLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+                titleLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+                titleLabel.lineBreakMode = .byTruncatingMiddle
+                titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-            let button = NSButton(title: "", target: self, action: #selector(filmstripPhotoSelected(_:)))
-            button.tag = index
-            button.isBordered = false
-            button.bezelStyle = .regularSquare
-            button.setButtonType(.momentaryPushIn)
-            button.translatesAutoresizingMaskIntoConstraints = false
+                let button = NSButton(title: "", target: self, action: #selector(filmstripPhotoSelected(_:)))
+                button.tag = filmstripIndex
+                button.isBordered = false
+                button.bezelStyle = .regularSquare
+                button.setButtonType(.momentaryPushIn)
+                button.translatesAutoresizingMaskIntoConstraints = false
 
-            let deleteButton = NSButton(title: "×", target: self, action: #selector(deleteFilmstripPhoto(_:)))
-            deleteButton.tag = index
-            deleteButton.bezelStyle = .circular
-            deleteButton.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-            deleteButton.toolTip = "从当前任务移除这个文件"
-            deleteButton.translatesAutoresizingMaskIntoConstraints = false
-            let tile = LegacyFilmstripTileView()
-            tile.translatesAutoresizingMaskIntoConstraints = false
-            tile.addSubview(imageView)
-            tile.addSubview(titleLabel)
-            tile.addSubview(button)
-            tile.addSubview(deleteButton)
-            NSLayoutConstraint.activate([
-                tile.widthAnchor.constraint(equalToConstant: 206),
-                tile.heightAnchor.constraint(equalToConstant: 44),
-                imageView.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
-                imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
-                imageView.widthAnchor.constraint(equalToConstant: 28),
-                imageView.heightAnchor.constraint(equalToConstant: 28),
-                titleLabel.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
-                titleLabel.trailingAnchor.constraint(equalTo: deleteButton.leadingAnchor, constant: -6),
-                titleLabel.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
-                button.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
-                button.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -34),
-                button.topAnchor.constraint(equalTo: tile.topAnchor, constant: 4),
-                button.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -4),
-                deleteButton.widthAnchor.constraint(equalToConstant: 22),
-                deleteButton.heightAnchor.constraint(equalToConstant: 22),
-                deleteButton.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
-                deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -6)
-            ])
-            tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
-            filmstripStack.addArrangedSubview(tile)
+                let deleteButton = NSButton(title: "×", target: self, action: #selector(deleteFilmstripPhoto(_:)))
+                deleteButton.tag = filmstripIndex
+                deleteButton.bezelStyle = .circular
+                deleteButton.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+                deleteButton.toolTip = "从当前任务移除这个文件"
+                deleteButton.translatesAutoresizingMaskIntoConstraints = false
+                let tile = LegacyFilmstripTileView()
+                tile.translatesAutoresizingMaskIntoConstraints = false
+                tile.addSubview(imageView)
+                tile.addSubview(titleLabel)
+                tile.addSubview(button)
+                tile.addSubview(deleteButton)
+                NSLayoutConstraint.activate([
+                    tile.widthAnchor.constraint(equalToConstant: 206),
+                    tile.heightAnchor.constraint(equalToConstant: 44),
+                    imageView.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
+                    imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                    imageView.widthAnchor.constraint(equalToConstant: 28),
+                    imageView.heightAnchor.constraint(equalToConstant: 28),
+                    titleLabel.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
+                    titleLabel.trailingAnchor.constraint(equalTo: deleteButton.leadingAnchor, constant: -6),
+                    titleLabel.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                    button.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
+                    button.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -34),
+                    button.topAnchor.constraint(equalTo: tile.topAnchor, constant: 4),
+                    button.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -4),
+                    deleteButton.widthAnchor.constraint(equalToConstant: 22),
+                    deleteButton.heightAnchor.constraint(equalToConstant: 22),
+                    deleteButton.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                    deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -6)
+                ])
+                tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
+                filmstripStack.addArrangedSubview(tile)
+            }
         }
         refreshThemeText(in: filmstripStack)
         updateFilmstripSelection()
     }
 
     private func updateFilmstripSelection() {
-        for view in filmstripStack.arrangedSubviews {
+        for (filmstripIndex, view) in filmstripStack.arrangedSubviews.enumerated() {
+            let isCurrent = filmstripPhotoRefs.indices.contains(filmstripIndex)
+                && filmstripPhotoRefs[filmstripIndex].taskIndex == selectedTaskIndex
+                && filmstripPhotoRefs[filmstripIndex].photoIndex == selectedPhotoIndex
             if let tile = view as? LegacyFilmstripTileView {
-                tile.isSelected = filmstripButtons(in: tile).contains { button in
-                    button.action == #selector(filmstripPhotoSelected(_:)) && button.tag == selectedPhotoIndex
-                }
+                tile.isSelected = isCurrent
             }
             let buttons = filmstripButtons(in: view)
             for button in buttons where button.action == #selector(filmstripPhotoSelected(_:)) {
-                button.state = button.tag == selectedPhotoIndex ? .on : .off
+                button.state = isCurrent ? .on : .off
             }
         }
     }
@@ -1804,18 +1833,74 @@ final class LegacyWindowController: NSViewController {
     }
 
     @objc private func taskListSelectionChanged(_ sender: NSButton) {
-        selectTask(at: sender.tag)
+        let index = sender.tag
+        guard tasks.indices.contains(index) else { return }
+        let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+        let isCheckbox = sender.identifier == NSUserInterfaceItemIdentifier("taskSelectionCheckbox")
+
+        if modifiers.contains(.shift), let anchor = lastTaskSelectionIndex {
+            let range = Set(min(anchor, index)...max(anchor, index))
+            selectedTaskIndexes = modifiers.contains(.command)
+                ? selectedTaskIndexes.union(range)
+                : range
+        } else if modifiers.contains(.command) || isCheckbox {
+            if selectedTaskIndexes.contains(index) {
+                selectedTaskIndexes.remove(index)
+            } else {
+                selectedTaskIndexes.insert(index)
+            }
+        } else {
+            selectedTaskIndexes = [index]
+        }
+
+        if selectedTaskIndexes.isEmpty {
+            selectedTaskIndexes = [index]
+        }
+        lastTaskSelectionIndex = index
+        let activeIndex = selectedTaskIndexes.contains(index)
+            ? index
+            : (selectedTaskIndexes.sorted().first ?? index)
+        selectTask(at: activeIndex, preserveTaskSelection: true)
     }
 
-    private func selectTask(at index: Int) {
+    private func selectTask(at index: Int, preserveTaskSelection: Bool = false) {
         guard tasks.indices.contains(index) else { return }
         saveCurrentCrops()
         selectedTaskIndex = index
         selectedPhotoIndex = 0
+        if !preserveTaskSelection {
+            selectedTaskIndexes = [index]
+            lastTaskSelectionIndex = index
+        }
         rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
         loadSelectedPhoto()
+    }
+
+    private func effectiveSelectedTaskIndexes() -> [Int] {
+        let valid = selectedTaskIndexes.filter { tasks.indices.contains($0) }.sorted()
+        if !valid.isEmpty { return valid }
+        return tasks.indices.contains(selectedTaskIndex) ? [selectedTaskIndex] : []
+    }
+
+    private func adjustTaskSelectionAfterDeletion(at deletedIndex: Int) {
+        selectedTaskIndexes = Set(selectedTaskIndexes.compactMap { index in
+            if index == deletedIndex { return nil }
+            return index > deletedIndex ? index - 1 : index
+        })
+        if let anchor = lastTaskSelectionIndex {
+            if anchor == deletedIndex {
+                lastTaskSelectionIndex = nil
+            } else if anchor > deletedIndex {
+                lastTaskSelectionIndex = anchor - 1
+            }
+        }
+        if selectedTaskIndexes.isEmpty, !tasks.isEmpty {
+            let fallback = min(deletedIndex, tasks.count - 1)
+            selectedTaskIndexes = [fallback]
+            lastTaskSelectionIndex = fallback
+        }
     }
 
     @objc private func photoSelectionChanged() {
@@ -1825,37 +1910,42 @@ final class LegacyWindowController: NSViewController {
     }
 
     @objc private func filmstripPhotoSelected(_ sender: NSButton) {
+        guard filmstripPhotoRefs.indices.contains(sender.tag) else { return }
         saveCurrentCrops()
-        selectedPhotoIndex = sender.tag
+        let ref = filmstripPhotoRefs[sender.tag]
+        selectedTaskIndex = ref.taskIndex
+        selectedPhotoIndex = ref.photoIndex
+        rebuildTaskList()
+        rebuildPhotoPopup()
         loadSelectedPhoto()
     }
 
     @objc private func deleteFilmstripPhoto(_ sender: NSButton) {
-        guard tasks.indices.contains(selectedTaskIndex),
-              tasks[selectedTaskIndex].photos.indices.contains(sender.tag) else { return }
-        let removedPhoto = tasks[selectedTaskIndex].photos[sender.tag]
-        let name = removedPhoto.name
-        detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(removedPhoto.url))
-        if sender.tag != selectedPhotoIndex {
+        guard filmstripPhotoRefs.indices.contains(sender.tag) else { return }
+        let ref = filmstripPhotoRefs[sender.tag]
+        guard tasks.indices.contains(ref.taskIndex),
+              tasks[ref.taskIndex].photos.indices.contains(ref.photoIndex) else { return }
+        if ref.taskIndex != selectedTaskIndex || ref.photoIndex != selectedPhotoIndex {
             saveCurrentCrops()
         }
+        selectedTaskIndex = ref.taskIndex
+        selectedPhotoIndex = ref.photoIndex
+        let removedPhoto = tasks[selectedTaskIndex].photos[selectedPhotoIndex]
+        let name = removedPhoto.name
+        detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(removedPhoto.url))
         let previousSelection = selectedPhotoIndex
-        let removedCurrentPhoto = sender.tag == previousSelection
-        tasks[selectedTaskIndex].photos.remove(at: sender.tag)
+        let removedCurrentPhoto = true
+        tasks[selectedTaskIndex].photos.remove(at: selectedPhotoIndex)
         if tasks[selectedTaskIndex].photos.isEmpty {
             let taskName = tasks[selectedTaskIndex].name
+            let deletedTaskIndex = selectedTaskIndex
             tasks.remove(at: selectedTaskIndex)
-            selectedTaskIndex = min(selectedTaskIndex, max(0, tasks.count - 1))
+            adjustTaskSelectionAfterDeletion(at: deletedTaskIndex)
+            selectedTaskIndex = min(deletedTaskIndex, max(0, tasks.count - 1))
             selectedPhotoIndex = 0
             statusLabel.stringValue = "已移除文件 \(name)，任务 \(taskName) 已为空并删除。"
         } else {
-            if sender.tag == previousSelection {
-                selectedPhotoIndex = min(previousSelection, tasks[selectedTaskIndex].photos.count - 1)
-            } else if sender.tag < previousSelection {
-                selectedPhotoIndex = max(0, previousSelection - 1)
-            } else {
-                selectedPhotoIndex = min(previousSelection, tasks[selectedTaskIndex].photos.count - 1)
-            }
+            selectedPhotoIndex = min(previousSelection, tasks[selectedTaskIndex].photos.count - 1)
             statusLabel.stringValue = "已从当前任务移除文件：\(name)"
         }
         rebuildTaskList()
@@ -1917,7 +2007,12 @@ final class LegacyWindowController: NSViewController {
         guard tasks.indices.contains(index) else { return }
         let name = tasks[index].name
         tasks.remove(at: index)
-        selectedTaskIndex = min(selectedTaskIndex, max(0, tasks.count - 1))
+        adjustTaskSelectionAfterDeletion(at: index)
+        if selectedTaskIndex > index {
+            selectedTaskIndex -= 1
+        } else if selectedTaskIndex == index {
+            selectedTaskIndex = min(index, max(0, tasks.count - 1))
+        }
         selectedPhotoIndex = 0
         rebuildTaskList()
         rebuildPhotoPopup()
@@ -1928,31 +2023,39 @@ final class LegacyWindowController: NSViewController {
 
     @objc private func applyCropsToCurrentTask() {
         saveCurrentCrops()
-        guard tasks.indices.contains(selectedTaskIndex), !canvas.crops.isEmpty else { return }
-        guard !tasks[selectedTaskIndex].isStopped else {
-            statusLabel.stringValue = "当前任务已终止，无法应用到全部。"
+        guard !canvas.crops.isEmpty else { return }
+        let taskIndexes = effectiveSelectedTaskIndexes().filter {
+            tasks.indices.contains($0) && !tasks[$0].isStopped && !tasks[$0].photos.isEmpty
+        }
+        guard !taskIndexes.isEmpty else {
+            statusLabel.stringValue = "没有可应用的已选任务。"
             return
         }
-        let taskIndex = selectedTaskIndex
         let sourceCrops = canvas.crops.sortedForReadingOrder()
         let anchor = sourceCrops[0].rect.normalized
-        let photos = tasks[taskIndex].photos
-        let selectedIndex = selectedPhotoIndex
-        statusLabel.stringValue = "正在以左上第一帧黑边为基准应用到其他图片..."
+        let selectedTask = selectedTaskIndex
+        let selectedPhoto = selectedPhotoIndex
+        let snapshots = taskIndexes.map { ($0, tasks[$0].photos) }
+        statusLabel.stringValue = "正在将当前红框应用到 \(taskIndexes.count) 个任务..."
         DispatchQueue.global(qos: .userInitiated).async {
-            let results = photos.enumerated().map { index, photo in
-                if index == selectedIndex {
-                    return sourceCrops
+            let results = snapshots.map { taskIndex, photos in
+                let crops = photos.enumerated().map { photoIndex, photo in
+                    if taskIndex == selectedTask && photoIndex == selectedPhoto {
+                        return sourceCrops
+                    }
+                    return LegacyFrameDetector.anchorAlignedCrops(url: photo.url, sourceCrops: sourceCrops, anchor: anchor)
                 }
-                return LegacyFrameDetector.anchorAlignedCrops(url: photo.url, sourceCrops: sourceCrops, anchor: anchor)
+                return (taskIndex, crops)
             }
             DispatchQueue.main.async {
-                guard self.tasks.indices.contains(taskIndex) else { return }
-                for index in self.tasks[taskIndex].photos.indices {
-                    self.tasks[taskIndex].photos[index].crops = results[index]
+                for (taskIndex, cropsByPhoto) in results where self.tasks.indices.contains(taskIndex) {
+                    for photoIndex in self.tasks[taskIndex].photos.indices
+                    where cropsByPhoto.indices.contains(photoIndex) {
+                        self.tasks[taskIndex].photos[photoIndex].crops = cropsByPhoto[photoIndex]
+                    }
                 }
                 self.loadSelectedPhoto()
-                self.statusLabel.stringValue = "已保留当前图片微调结果，并按左上第一帧黑边基准应用到其他图片。"
+                self.statusLabel.stringValue = "已将当前红框应用到 \(taskIndexes.count) 个已选任务。"
                 self.refreshSummary()
             }
         }
@@ -2061,39 +2164,49 @@ final class LegacyWindowController: NSViewController {
 
     @objc private func autoIdentify() {
         saveCurrentCrops()
-        guard tasks.indices.contains(selectedTaskIndex), !tasks[selectedTaskIndex].photos.isEmpty else { return }
-        guard !tasks[selectedTaskIndex].isStopped else {
-            statusLabel.stringValue = "当前任务已终止，无法自动识别。"
+        let taskIndexes = effectiveSelectedTaskIndexes().filter {
+            tasks.indices.contains($0) && !tasks[$0].isStopped && !tasks[$0].photos.isEmpty
+        }
+        guard !taskIndexes.isEmpty else {
+            statusLabel.stringValue = "没有可识别的已选任务。"
             return
         }
         let template = templateRect ?? canvas.currentTemplateRect
         guard let template else { return }
-        let taskIndex = selectedTaskIndex
-        let photos = tasks[taskIndex].photos
-        let selectedIndex = selectedPhotoIndex
-        statusLabel.stringValue = "正在批量按参考红框和黑色片距识别..."
+        let selectedTask = selectedTaskIndex
+        let selectedPhoto = selectedPhotoIndex
+        let snapshots = taskIndexes.map { ($0, tasks[$0].photos) }
+        let photoCount = snapshots.reduce(0) { $0 + $1.1.count }
+        statusLabel.stringValue = "正在识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
         DispatchQueue.global(qos: .userInitiated).async {
-            let detections = photos.map { photo -> LegacyDetectionResult in
-                let result = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
-                if result.crops.isEmpty {
-                    return LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: result.candidates)
+            let results = snapshots.map { taskIndex, photos in
+                let detections = photos.map { photo -> LegacyDetectionResult in
+                    let result = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
+                    if result.crops.isEmpty {
+                        return LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: result.candidates)
+                    }
+                    let candidate = result.candidates.first
+                    let fixed = Self.templateSizedCrops(from: candidate?.rects ?? result.crops.map(\.rect), template: template)
+                    return LegacyDetectionResult(crops: fixed, candidates: result.candidates)
                 }
-                let candidate = result.candidates.first
-                let fixed = Self.templateSizedCrops(from: candidate?.rects ?? result.crops.map(\.rect), template: template)
-                return LegacyDetectionResult(crops: fixed, candidates: result.candidates)
+                return (taskIndex, photos, detections)
             }
             DispatchQueue.main.async {
-                guard self.tasks.indices.contains(taskIndex) else { return }
-                for index in self.tasks[taskIndex].photos.indices {
-                    self.tasks[taskIndex].photos[index].crops = detections[index].crops
-                    self.detectionCandidatesByPhotoPath[self.photoKey(photos[index].url)] = detections[index].candidates
+                var cropCount = 0
+                for (taskIndex, photos, detections) in results where self.tasks.indices.contains(taskIndex) {
+                    for photoIndex in self.tasks[taskIndex].photos.indices
+                    where detections.indices.contains(photoIndex) && photos.indices.contains(photoIndex) {
+                        self.tasks[taskIndex].photos[photoIndex].crops = detections[photoIndex].crops
+                        self.detectionCandidatesByPhotoPath[self.photoKey(photos[photoIndex].url)] = detections[photoIndex].candidates
+                        cropCount += detections[photoIndex].crops.count
+                    }
                 }
                 self.loadSelectedPhoto()
-                let count = detections.reduce(0) { $0 + $1.crops.count }
-                if detections.indices.contains(selectedIndex) {
-                    self.detectionReportLabel.stringValue = detections[selectedIndex].reportText
+                if let selectedResult = results.first(where: { $0.0 == selectedTask }),
+                   selectedResult.2.indices.contains(selectedPhoto) {
+                    self.detectionReportLabel.stringValue = selectedResult.2[selectedPhoto].reportText
                 }
-                self.statusLabel.stringValue = "已识别 \(photos.count) 张图片，共 \(count) 个红框。"
+                self.statusLabel.stringValue = "已识别 \(taskIndexes.count) 个任务、\(photoCount) 张图片，共 \(cropCount) 个红框。"
                 self.refreshSummary()
             }
         }
@@ -2101,24 +2214,36 @@ final class LegacyWindowController: NSViewController {
 
     @objc private func exportCrops() {
         saveCurrentCrops()
-        guard let task = selectedTask, !task.photos.isEmpty else { return }
-        guard !task.isStopped else {
-            statusLabel.stringValue = "当前任务已终止，无法导出。"
+        let taskIndexes = effectiveSelectedTaskIndexes().filter {
+            tasks.indices.contains($0) && !tasks[$0].isStopped && !tasks[$0].photos.isEmpty
+        }
+        guard !taskIndexes.isEmpty else {
+            statusLabel.stringValue = "没有可导出的已选任务。"
             return
         }
-        let directory = exportDirectory ?? task.rootURL
         let format = exportFormat
         let dustEnabled = dustRemovalEnabled
         let dustStrength = dustRemovalStrength
-        let photos = task.photos
-        statusLabel.stringValue = dustEnabled ? "正在批量导出并除尘..." : "正在批量导出..."
+        let usesSeparateFolders = taskIndexes.count > 1
+        let snapshots = taskIndexes.map { taskIndex -> (String, URL, [LegacyPhoto]) in
+            let task = tasks[taskIndex]
+            let directory = usesSeparateFolders ? task.rootURL : (exportDirectory ?? task.rootURL)
+            return (task.name, directory, task.photos)
+        }
+        statusLabel.stringValue = dustEnabled
+            ? "正在将 \(taskIndexes.count) 个任务分别导出并除尘..."
+            : "正在将 \(taskIndexes.count) 个任务分别导出..."
         DispatchQueue.global(qos: .userInitiated).async {
             var outputs: [URL] = []
-            for photo in photos {
-                outputs.append(contentsOf: LegacyExporter.export(url: photo.url, crops: photo.crops, directory: directory, format: format, dustEnabled: dustEnabled, dustStrength: dustStrength, rotationDegrees: photo.previewRotationDegrees, inverted: photo.isInverted, adjustments: photo.adjustments))
+            for (_, directory, photos) in snapshots {
+                for photo in photos {
+                    outputs.append(contentsOf: LegacyExporter.export(url: photo.url, crops: photo.crops, directory: directory, format: format, dustEnabled: dustEnabled, dustStrength: dustStrength, rotationDegrees: photo.previewRotationDegrees, inverted: photo.isInverted, adjustments: photo.adjustments))
+                }
             }
             DispatchQueue.main.async {
-                self.statusLabel.stringValue = "已导出 \(outputs.count) 个文件到 \(directory.path)"
+                self.statusLabel.stringValue = usesSeparateFolders
+                    ? "已将 \(outputs.count) 个文件分别导出到 \(taskIndexes.count) 个任务原文件夹。"
+                    : "已导出 \(outputs.count) 个文件到 \(snapshots[0].1.path)"
             }
         }
     }
@@ -2131,8 +2256,13 @@ final class LegacyWindowController: NSViewController {
         panel.directoryURL = exportDirectory
         if panel.runModal() == .OK, let url = panel.url {
             exportDirectory = url
-            outputLabel.stringValue = "输出：\(url.path)"
-            statusLabel.stringValue = "已选择导出文件夹。"
+            if effectiveSelectedTaskIndexes().count > 1 {
+                outputLabel.stringValue = "输出：多选任务分别输出到各自原文件夹"
+                statusLabel.stringValue = "已保存单任务导出路径；当前多选任务仍会分别导出到各自原文件夹。"
+            } else {
+                outputLabel.stringValue = "输出：\(url.path)"
+                statusLabel.stringValue = "已选择导出文件夹。"
+            }
         }
     }
 
@@ -2164,7 +2294,8 @@ final class LegacyWindowController: NSViewController {
         let totalPhotos = tasks.reduce(0) { $0 + $1.photos.count }
         let totalCrops = tasks.reduce(0) { $0 + $1.cropCount }
         let taskText = selectedTask.map { "\($0.name) · \($0.photos.count) 张" } ?? "未导入任务"
-        cropCountLabel.stringValue = "\(tasks.count) 个任务 · \(totalPhotos) 张图片 · 当前任务 \(taskText) · 当前红框 \(canvas.crops.count) 个 · 全部红框 \(totalCrops) 个 · A 新增，S/Delete 删除，D 放大镜，滚轮缩放"
+        let selectedCount = effectiveSelectedTaskIndexes().count
+        cropCountLabel.stringValue = "\(tasks.count) 个任务（已选 \(selectedCount)）· \(totalPhotos) 张图片 · 当前任务 \(taskText) · 当前红框 \(canvas.crops.count) 个 · 全部红框 \(totalCrops) 个 · A 新增，S/Delete 删除，D 放大镜，滚轮缩放"
     }
 
     private func taskRootURL(from urls: [URL], fallback: URL) -> URL {
