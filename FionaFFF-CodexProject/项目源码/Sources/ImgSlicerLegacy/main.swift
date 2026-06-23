@@ -1354,35 +1354,96 @@ final class LegacyWindowController: NSViewController {
     private func importItems(_ urls: [URL]) {
         let includeFFFParsing = fffParsingCheckbox.state == .on
         FFFParsingRuntime.isEnabled = includeFFFParsing
-        let found = LegacyFolderScanner.scan(urls: urls, includeFFFParsing: includeFFFParsing)
-        guard !found.isEmpty else {
+        let groupedItems = groupedImportItems(from: urls, includeFFFParsing: includeFFFParsing)
+        guard !groupedItems.isEmpty else {
             statusLabel.stringValue = includeFFFParsing
                 ? "没有找到可处理图片。"
                 : "没有找到可处理图片；FFF/3F 解析已关闭。"
             return
         }
-        for url in found {
-            detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(url))
+
+        var importedPhotoCount = 0
+        var firstImportedPhoto: LegacyPhoto?
+        for item in groupedItems {
+            for url in item.files {
+                detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(url))
+            }
+            let template = templateCompatible(with: item.files.first) ? templateRect : nil
+            let photos = item.files.map { url in
+                let crop = template ?? CGRect(x: 0.05, y: 0.08, width: 0.18, height: 0.72)
+                return LegacyPhoto(url: url, crops: [LegacyCrop(rect: crop)])
+            }
+            guard !photos.isEmpty else { continue }
+            let task = LegacyTask(name: item.name, rootURL: item.rootURL, photos: photos)
+            tasks.append(task)
+            importedPhotoCount += photos.count
+            if firstImportedPhoto == nil {
+                firstImportedPhoto = photos.first
+            }
         }
-        let template = templateCompatible(with: found.first) ? templateRect : nil
-        let photos = found.map { url in
-            let crop = template ?? CGRect(x: 0.05, y: 0.08, width: 0.18, height: 0.72)
-            return LegacyPhoto(url: url, crops: [LegacyCrop(rect: crop)])
-        }
-        let root = taskRootURL(from: urls, fallback: found[0].deletingLastPathComponent())
-        let task = LegacyTask(name: taskName(from: urls, fallback: root), rootURL: root, photos: photos)
-        tasks.append(task)
+        guard importedPhotoCount > 0 else { return }
         selectedTaskIndex = tasks.count - 1
         selectedPhotoIndex = 0
-        exportDirectory = found.first?.deletingLastPathComponent()
-        templateRect = photos.first?.crops.first?.rect ?? template
-        templateImageAspect = found.first.flatMap { cachedImageAspect(url: $0) }
+        if let firstImportedPhoto {
+            templateRect = firstImportedPhoto.crops.first?.rect ?? templateRect
+            templateImageAspect = cachedImageAspect(url: firstImportedPhoto.url)
+        }
         rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
         loadSelectedPhoto()
-        statusLabel.stringValue = "已导入 \(photos.count) 张图片。"
+        statusLabel.stringValue = "已导入 \(groupedItems.count) 个任务，共 \(importedPhotoCount) 张图片。"
         refreshSummary()
+    }
+
+    private struct LegacyImportGroup {
+        var name: String
+        var rootURL: URL
+        var files: [URL]
+    }
+
+    private func groupedImportItems(from urls: [URL], includeFFFParsing: Bool) -> [LegacyImportGroup] {
+        let standardizedURLs = urls.map { $0.standardizedFileURL }
+        let directoryInputs = standardizedURLs.filter { isDirectory($0) }
+        if directoryInputs.count >= 2 {
+            var groups: [LegacyImportGroup] = directoryInputs.compactMap { directory in
+                let files = LegacyFolderScanner.scan(urls: [directory], includeFFFParsing: includeFFFParsing)
+                guard !files.isEmpty else { return nil }
+                return LegacyImportGroup(name: directory.lastPathComponent, rootURL: directory, files: files)
+            }
+            let fileInputs = standardizedURLs.filter { !isDirectory($0) }
+            groups.append(contentsOf: groupedImportItems(from: fileInputs, includeFFFParsing: includeFFFParsing))
+            return groups
+        }
+
+        var groupsByRoot: [String: LegacyImportGroup] = [:]
+        for url in standardizedURLs {
+            let root = isDirectory(url) ? url : url.deletingLastPathComponent()
+            let files = LegacyFolderScanner.scan(urls: [url], includeFFFParsing: includeFFFParsing)
+            guard !files.isEmpty else { continue }
+            let key = root.path
+            if var existing = groupsByRoot[key] {
+                existing.files.append(contentsOf: files)
+                groupsByRoot[key] = existing
+            } else {
+                groupsByRoot[key] = LegacyImportGroup(name: root.lastPathComponent, rootURL: root, files: files)
+            }
+        }
+
+        return groupsByRoot.values
+            .map { group in
+                var seen = Set<String>()
+                let files = group.files
+                    .filter { seen.insert($0.path).inserted }
+                    .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+                return LegacyImportGroup(name: group.name, rootURL: group.rootURL, files: files)
+            }
+            .filter { !$0.files.isEmpty }
+            .sorted { $0.rootURL.path.localizedStandardCompare($1.rootURL.path) == .orderedAscending }
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
     }
 
     private func loadSelectedPhoto() {
@@ -1406,7 +1467,7 @@ final class LegacyWindowController: NSViewController {
             adjustments: photo.adjustments
         )
         fileNameLabel.stringValue = "\(task.name)：\(selectedPhotoIndex + 1) / \(task.photos.count)  \(photo.name)"
-        outputLabel.stringValue = "输出：\(exportDirectory?.path ?? photo.url.deletingLastPathComponent().path)"
+        outputLabel.stringValue = "输出：\(exportDirectory?.path ?? task.rootURL.path)"
         photoPopup.selectItem(at: selectedPhotoIndex)
         rebuildAlgorithmPopup(for: photo)
         updateFilmstripSelection()
@@ -1751,7 +1812,6 @@ final class LegacyWindowController: NSViewController {
         saveCurrentCrops()
         selectedTaskIndex = index
         selectedPhotoIndex = 0
-        exportDirectory = selectedTask?.rootURL
         rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
