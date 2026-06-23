@@ -2433,6 +2433,18 @@ enum LegacyFrameDetector {
         let analysis = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096)
         if let gray = analysis {
             let luminances = gray.bytes.map { Double($0) / 255.0 }
+            if let singleRect = detectSingleFrameRect(
+                luminances: luminances,
+                width: gray.width,
+                height: gray.height
+            ) {
+                candidates.append(LegacyDetectionCandidate(
+                    title: "单张完整片框",
+                    detail: "单幅扫描，按底片外边界识别一个画面",
+                    rects: [singleRect],
+                    score: scoreCandidate([singleRect], expectedCount: 1) + 0.38
+                ))
+            }
             let strictRects = detectTwoRowSixFrameRects(luminances: luminances, width: gray.width, height: gray.height)
             if strictRects.count == 12 {
                 let hasCompleteCoverage = hasCompleteTwoRowSixCoverage(strictRects)
@@ -2483,7 +2495,8 @@ enum LegacyFrameDetector {
             candidates = candidates.map { candidate in
                 let isAlreadyRefinedFilmCandidate =
                     candidate.title == "按实际张数识别" ||
-                    candidate.title == "浅色/黑色片距"
+                    candidate.title == "浅色/黑色片距" ||
+                    candidate.title == "单张完整片框"
                 return LegacyDetectionCandidate(
                     title: candidate.title,
                     detail: candidate.detail,
@@ -2515,7 +2528,8 @@ enum LegacyFrameDetector {
             .map { candidate -> LegacyDetectionCandidate in
                 let preservesDetectedFilmFrames =
                     candidate.title == "按实际张数识别" ||
-                    candidate.title == "浅色/黑色片距"
+                    candidate.title == "浅色/黑色片距" ||
+                    candidate.title == "单张完整片框"
                 let rects = preservesDetectedFilmFrames
                     ? candidate.rects.map { $0.normalized }.sortedForReadingOrder()
                     : nonOverlappingRects(candidate.rects)
@@ -2586,6 +2600,57 @@ enum LegacyFrameDetector {
         }
         guard !filtered.isEmpty else { return [] }
         return filtered.sortedForReadingOrder()
+    }
+
+    private static func detectSingleFrameRect(luminances: [Double], width: Int, height: Int) -> CGRect? {
+        guard width > 120, height > 120 else { return nil }
+        let aspect = Double(width) / Double(height)
+        guard aspect >= 0.45 && aspect <= 2.20 else { return nil }
+
+        let rowOccupancy = (0..<height).map { y -> Double in
+            var nonWhite = 0
+            for x in 0..<width where luminances[y * width + x] < 0.985 {
+                nonWhite += 1
+            }
+            return Double(nonWhite) / Double(width)
+        }
+        guard let row = thresholdSegments(
+            values: movingAverage(rowOccupancy, window: max(3, height / 500)),
+            threshold: 0.14,
+            minimumSize: max(30, height / 3),
+            lessThan: false
+        ).max(by: { $0.size < $1.size }) else { return nil }
+
+        let columnOccupancy = (0..<width).map { x -> Double in
+            var nonWhite = 0
+            for y in row.start..<row.end where luminances[y * width + x] < 0.985 {
+                nonWhite += 1
+            }
+            return Double(nonWhite) / Double(max(1, row.size))
+        }
+        guard let column = thresholdSegments(
+            values: movingAverage(columnOccupancy, window: max(3, width / 500)),
+            threshold: 0.14,
+            minimumSize: max(30, width / 3),
+            lessThan: false
+        ).max(by: { $0.size < $1.size }) else { return nil }
+
+        let outer = CGRect(
+            x: Double(column.start) / Double(width),
+            y: Double(row.start) / Double(height),
+            width: Double(column.size) / Double(width),
+            height: Double(row.size) / Double(height)
+        ).normalized
+        guard outer.area >= 0.42 else { return nil }
+        return refineNegativeFrameRect(
+            xStart: column.start,
+            xEnd: column.end,
+            yStart: row.start,
+            yEnd: row.end,
+            luminances: luminances,
+            width: width,
+            height: height
+        )
     }
 
     private static func detectTwoRowSixFrameRects(luminances: [Double], width: Int, height: Int) -> [CGRect] {
