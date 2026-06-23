@@ -477,18 +477,19 @@ final class LegacyWindowController: NSViewController {
         arrowKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self,
                   event.window === self.view.window,
-                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                  event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 return event
             }
+            let moveAll = event.modifierFlags.contains(.command)
             switch event.keyCode {
             case 123:
-                self.nudgeAllCrops(dx: -0.001, dy: 0)
+                moveAll ? self.nudgeAllCrops(dx: -0.001, dy: 0) : self.nudgeSelectedCrop(dx: -0.001, dy: 0)
             case 124:
-                self.nudgeAllCrops(dx: 0.001, dy: 0)
+                moveAll ? self.nudgeAllCrops(dx: 0.001, dy: 0) : self.nudgeSelectedCrop(dx: 0.001, dy: 0)
             case 125:
-                self.nudgeAllCrops(dx: 0, dy: -0.001)
+                moveAll ? self.nudgeAllCrops(dx: 0, dy: -0.001) : self.nudgeSelectedCrop(dx: 0, dy: -0.001)
             case 126:
-                self.nudgeAllCrops(dx: 0, dy: 0.001)
+                moveAll ? self.nudgeAllCrops(dx: 0, dy: 0.001) : self.nudgeSelectedCrop(dx: 0, dy: 0.001)
             default:
                 return event
             }
@@ -1881,7 +1882,17 @@ final class LegacyWindowController: NSViewController {
         guard !canvas.crops.isEmpty else { return }
         canvas.crops = canvas.crops.map { LegacyCrop(rect: $0.rect.offsetBy(dx: dx, dy: dy).normalized, angle: $0.angle) }
         saveCurrentCrops()
-        statusLabel.stringValue = "已统一微调当前图片全部红框。"
+        statusLabel.stringValue = "已用 Command＋方向键统一移动全部红框。"
+        refreshSummary()
+    }
+
+    private func nudgeSelectedCrop(dx: CGFloat, dy: CGFloat) {
+        guard canvas.nudgeSelectedCrop(dx: dx, dy: dy) else {
+            statusLabel.stringValue = "请先点击选择一个红框，再使用方向键移动。"
+            return
+        }
+        saveCurrentCrops()
+        statusLabel.stringValue = "已用方向键移动选中的红框。"
         refreshSummary()
     }
 
@@ -2020,7 +2031,7 @@ final class LegacyCanvasView: NSView {
             }
         }
     }
-    var selectedIndex: Int?
+    var selectedIndex: Int? { didSet { needsDisplay = true } }
     var previewRotationDegrees: Int = 0 { didSet { needsDisplay = true } }
     var isInverted: Bool = false {
         didSet {
@@ -2189,11 +2200,16 @@ final class LegacyCanvasView: NSView {
         NSGraphicsContext.current?.saveGraphicsState()
         imageTransform(for: rect).concat()
         drawnImage.draw(in: rect)
-        NSColor.red.setStroke()
         for (index, crop) in crops.enumerated() {
             let r = viewRect(from: crop.rect, imageRect: rect)
             let path = rotatedRectPath(rect: r, angle: crop.angle)
-            path.lineWidth = index == selectedIndex ? 0.9 : 0.6
+            if index == selectedIndex {
+                NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.06, alpha: 1).setStroke()
+                path.lineWidth = 1.35
+            } else {
+                NSColor(calibratedRed: 0.96, green: 0.12, blue: 0.10, alpha: 0.92).setStroke()
+                path.lineWidth = 0.65
+            }
             path.stroke()
         }
         NSGraphicsContext.current?.restoreGraphicsState()
@@ -2391,18 +2407,27 @@ final class LegacyCanvasView: NSView {
 
     override func keyDown(with event: NSEvent) {
         let key = event.charactersIgnoringModifiers?.lowercased()
+        let moveAll = event.modifierFlags.contains(.command)
+        let nudge: (CGFloat, CGFloat) -> Void = { [weak self] dx, dy in
+            guard let self else { return }
+            if moveAll {
+                self.onNudgeAll?(dx, dy)
+            } else {
+                _ = self.nudgeSelectedCrop(dx: dx, dy: dy)
+            }
+        }
         switch event.keyCode {
         case 123:
-            onNudgeAll?(-0.001, 0)
+            nudge(-0.001, 0)
             return
         case 124:
-            onNudgeAll?(0.001, 0)
+            nudge(0.001, 0)
             return
         case 125:
-            onNudgeAll?(0, -0.001)
+            nudge(0, -0.001)
             return
         case 126:
-            onNudgeAll?(0, 0.001)
+            nudge(0, 0.001)
             return
         default:
             break
@@ -2429,6 +2454,16 @@ final class LegacyCanvasView: NSView {
         self.selectedIndex = crops.isEmpty ? nil : (crops.indices.contains(selectedIndex) ? selectedIndex : crops.indices.last)
         onCropsChanged?()
         needsDisplay = true
+    }
+
+    @discardableResult
+    func nudgeSelectedCrop(dx: CGFloat, dy: CGFloat) -> Bool {
+        guard let selectedIndex, crops.indices.contains(selectedIndex) else { return false }
+        crops[selectedIndex].rect = crops[selectedIndex].rect.offsetBy(dx: dx, dy: dy).normalized
+        onCropChanged?(crops[selectedIndex].rect)
+        onCropsChanged?()
+        needsDisplay = true
+        return true
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -2669,9 +2704,9 @@ final class LegacyCanvasView: NSView {
             width: cropViewRect.width / imageRect.width * displayImage.size.width * scaleX,
             height: cropViewRect.height / imageRect.height * displayImage.size.height * scaleY
         )
-        NSColor.red.setStroke()
+        NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.06, alpha: 1).setStroke()
         let cropPath = rotatedRectPath(rect: cropLensRect, angle: activeCrop.angle)
-        cropPath.lineWidth = 1.0
+        cropPath.lineWidth = 1.35
         cropPath.stroke()
         NSGraphicsContext.current?.restoreGraphicsState()
 
