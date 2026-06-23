@@ -32,3 +32,4 @@ swift build
 重新打包：
 
 bash scripts/package-mac.sh
+推送权限测试：此行用于验证远端推送流程。
