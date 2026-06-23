@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
-APP_VERSION="0.35.2"
-APP_BUILD="73"
-RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
+APP_VERSION="0.35.3"
+APP_BUILD="74"
+APP_DISPLAY_NAME="FionaFFF Test Mojave $APP_VERSION-$APP_BUILD"
+APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0353.b74"
+RELEASE_BASE_NAME="FionaFFF-Test-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$DIST_DIR/$RELEASE_NAME"
@@ -105,19 +106,19 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>
   <string>fiona-spotter-tool</string>
   <key>CFBundleIdentifier</key>
-  <string>local.fiona.fff</string>
+  <string>__APP_BUNDLE_ID__</string>
   <key>CFBundleName</key>
-  <string>FionaFFF</string>
+  <string>__APP_DISPLAY_NAME__</string>
   <key>CFBundleDisplayName</key>
-  <string>FionaFFF</string>
+  <string>__APP_DISPLAY_NAME__</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-73</string>
+  <string>__APP_VERSION__</string>
   <key>CFBundleVersion</key>
-  <string>73</string>
+  <string>__APP_BUILD__</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>
@@ -126,11 +127,18 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+sed -i '' \
+  -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" \
+  -e "s/__APP_BUNDLE_ID__/$APP_BUNDLE_ID/g" \
+  -e "s/__APP_VERSION__/$APP_VERSION/g" \
+  -e "s/__APP_BUILD__/$APP_BUILD/g" \
+  "$CONTENTS/Info.plist"
+
 install_name_tool -delete_rpath "@executable_path/../Frameworks" "$REAL_EXECUTABLE" 2>/dev/null || true
 install_name_tool -add_rpath /usr/lib/swift "$REAL_EXECUTABLE" 2>/dev/null || true
 
 cat > "$README_PATH" <<'TXT'
-FionaFFF Mojave Intel 打开说明
+__APP_DISPLAY_NAME__ Intel 打开说明
 
 这个包用于 macOS 10.14.6 Mojave Intel 电脑。
 
@@ -139,18 +147,20 @@ FionaFFF Mojave Intel 打开说明
 1. 打开 DMG。
 2. 双击“安装.command”。
 3. 如果系统提示不能打开脚本，请右键“安装.command”选择“打开”。
-4. 脚本会复制 FionaFFF.app 到“应用程序”，重新本机签名，并清除 Gatekeeper 隔离标记。
+4. 脚本会复制 __APP_DISPLAY_NAME__.app 到“应用程序”，重新本机签名，并清除 Gatekeeper 隔离标记。
 
 如果双击 app 提示“已损坏”或“无法验证开发者”，通常不是文件损坏，而是未公证测试包被 macOS 加了隔离标记。
 
 手动修复：
 
-   xattr -dr com.apple.quarantine "/Applications/FionaFFF.app"
-   codesign --force --deep --sign - "/Applications/FionaFFF.app"
+   xattr -dr com.apple.quarantine "/Applications/__APP_DISPLAY_NAME__.app"
+   codesign --force --deep --sign - "/Applications/__APP_DISPLAY_NAME__.app"
 
 说明：
 当前是本地测试包，没有 Apple Developer ID 公证签名。正式分发需要 Apple Developer ID 签名并 notarize。
 TXT
+
+sed -i '' -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" "$README_PATH"
 
 cat > "$CHANGELOG_PATH" <<TXT
 $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
@@ -221,7 +231,7 @@ cat > "$INSTALLER_PATH" <<'SCRIPT'
 #!/bin/bash
 set -e
 
-APP_NAME="FionaFFF.app"
+APP_NAME="__APP_DISPLAY_NAME__.app"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_APP="$SOURCE_DIR/$APP_NAME"
 TARGET_APP="/Applications/$APP_NAME"
@@ -232,7 +242,23 @@ if [ ! -d "$SOURCE_APP" ]; then
   exit 1
 fi
 
-echo "正在安装 FionaFFF 到 /Applications..."
+echo "正在安装 __APP_DISPLAY_NAME__ 到 /Applications..."
+echo "正在关闭可能仍在运行的旧版 FionaFFF..."
+killall "fiona-spotter-tool-bin" 2>/dev/null || true
+killall "fiona-spotter-tool" 2>/dev/null || true
+sleep 1
+
+for OLD_APP in \
+  "/Applications/FionaFFF Test Mojave 0.35.2.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.3-74.app"; do
+  if [ -e "$OLD_APP" ] && [ "$OLD_APP" != "$TARGET_APP" ]; then
+    echo "正在移除旧测试版：$OLD_APP"
+    if ! rm -rf "$OLD_APP" 2>/dev/null; then
+      sudo rm -rf "$OLD_APP"
+    fi
+  fi
+done
+
 if [ -e "$TARGET_APP" ]; then
   echo "正在删除旧版本..."
   if ! rm -rf "$TARGET_APP" 2>/dev/null; then
@@ -255,7 +281,7 @@ xattr -cr "$TARGET_APP" 2>/dev/null || true
 echo "正在进行本机 ad-hoc 签名..."
 codesign --force --deep --sign - "$TARGET_APP"
 
-echo "正在启动 FionaFFF..."
+echo "正在启动 __APP_DISPLAY_NAME__..."
 open "$TARGET_APP"
 
 echo ""
@@ -263,13 +289,15 @@ echo "安装完成。"
 read -n 1 -s -r -p "按任意键关闭窗口..."
 SCRIPT
 
+sed -i '' -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" "$INSTALLER_PATH"
+
 chmod +x "$INSTALLER_PATH"
 
 cat > "$DIAGNOSTIC_PATH" <<'SCRIPT'
 #!/bin/bash
 set -e
 
-APP_NAME="FionaFFF.app"
+APP_NAME="__APP_DISPLAY_NAME__.app"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_APP="$SOURCE_DIR/$APP_NAME"
 TARGET_APP="/Applications/$APP_NAME"
@@ -305,14 +333,16 @@ echo "启动器日志在桌面：fionafff-mojave-launcher.log"
 read -n 1 -s -r -p "按任意键关闭窗口..."
 SCRIPT
 
+sed -i '' -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" "$DIAGNOSTIC_PATH"
+
 chmod +x "$DIAGNOSTIC_PATH"
 
-codesign --force --deep --sign - "$APP_DIR"
 xattr -cr "$APP_DIR"
+codesign --force --deep --sign - "$APP_DIR"
 hdiutil create -volname "$RELEASE_NAME" -srcfolder "$RELEASE_DIR" -ov -format UDZO "$DMG_PATH"
 
 SMB_COPY_DIR="/Volumes/照片临时/fionafff客户端"
-if [ -d "$(dirname "$SMB_COPY_DIR")" ]; then
+if [ "${COPY_TO_SMB:-0}" = "1" ] && [ -d "$(dirname "$SMB_COPY_DIR")" ]; then
   mkdir -p "$SMB_COPY_DIR" 2>/dev/null || true
   if [ -d "$SMB_COPY_DIR" ] && cp -f "$DMG_PATH" "$SMB_COPY_DIR/"; then
     echo "已复制 DMG 到 SMB：$SMB_COPY_DIR/$(basename "$DMG_PATH")"
@@ -320,7 +350,7 @@ if [ -d "$(dirname "$SMB_COPY_DIR")" ]; then
     echo "未能复制 DMG 到 SMB：$SMB_COPY_DIR"
   fi
 else
-  echo "SMB 共享未挂载，跳过复制：$SMB_COPY_DIR"
+  echo "未启用 SMB 复制，跳过：$SMB_COPY_DIR"
 fi
 
 echo "$APP_DIR"
