@@ -326,7 +326,6 @@ final class LegacyWindowController: NSViewController {
     private let outputLabel = NSTextField(labelWithString: "默认导出到原文件夹")
     private let cropCountLabel = NSTextField(labelWithString: "红框 0 个")
     private let detectionReportLabel = NSTextField(labelWithString: "算法候选：等待识别")
-    private let algorithmListScroll = NSScrollView()
     private let algorithmListStack = NSStackView()
     private let taskListScroll = NSScrollView()
     private let taskListStack = LegacyFlippedStackView()
@@ -769,25 +768,17 @@ final class LegacyWindowController: NSViewController {
         viewActions.alignment = .centerY
         viewActions.spacing = 6
 
-        let fileTitle = label("文件操作", size: 11, weight: .semibold)
-        let toolsTitle = label("画面与选框", size: 11, weight: .semibold)
-        let fileSection = NSStackView(views: [fileTitle, fileActions])
-        fileSection.orientation = .vertical
-        fileSection.alignment = .leading
-        fileSection.spacing = 6
-        fileSection.translatesAutoresizingMaskIntoConstraints = false
-
-        let toolsSection = NSStackView(views: [
-            toolsTitle,
+        let fileSection = sectionCard(title: "文件操作", views: [fileActions], tone: 0)
+        let toolsContent = NSStackView(views: [
             identifyButton,
             rotateActions,
             zoomActions,
             viewActions
         ])
-        toolsSection.orientation = .vertical
-        toolsSection.alignment = .leading
-        toolsSection.spacing = 8
-        toolsSection.translatesAutoresizingMaskIntoConstraints = false
+        toolsContent.orientation = .vertical
+        toolsContent.alignment = .leading
+        toolsContent.spacing = 8
+        let toolsSection = sectionCard(title: "画面与选框", views: [toolsContent], tone: 1)
 
         let title = label("任务列表", size: 13, weight: .semibold)
         let taskCount = label("0", size: 10, weight: .medium, color: NSColor(calibratedWhite: 0.62, alpha: 1))
@@ -808,31 +799,30 @@ final class LegacyWindowController: NSViewController {
         taskListScroll.autohidesScrollers = true
         taskListScroll.drawsBackground = false
         taskListScroll.translatesAutoresizingMaskIntoConstraints = false
+        let taskSection = sectionCard(title: "", views: [titleRow, taskListScroll], tone: 2)
 
-        for item in [fileSection, toolsSection, titleRow, taskListScroll] {
+        for item in [fileSection, toolsSection, taskSection] {
             item.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(item)
         }
         NSLayoutConstraint.activate([
-            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            fileSection.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            fileSection.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
 
-            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 14),
-            identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor),
+            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 8),
+            identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor, constant: -16),
 
-            titleRow.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            titleRow.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            titleRow.topAnchor.constraint(equalTo: toolsSection.bottomAnchor, constant: 16),
-
-            taskListScroll.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
-            taskListScroll.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
-            taskListScroll.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 8),
-            taskListScroll.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            taskSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            taskSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            taskSection.topAnchor.constraint(equalTo: toolsSection.bottomAnchor, constant: 8),
+            taskSection.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
             taskListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor)
+            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor),
+            titleRow.widthAnchor.constraint(equalTo: taskSection.widthAnchor, constant: -16),
+            taskListScroll.widthAnchor.constraint(equalTo: taskSection.widthAnchor, constant: -16)
         ])
         rebuildTaskList()
         return box
@@ -866,12 +856,8 @@ final class LegacyWindowController: NSViewController {
         algorithmListStack.alignment = .leading
         algorithmListStack.spacing = 5
         algorithmListStack.translatesAutoresizingMaskIntoConstraints = false
-        algorithmListScroll.documentView = algorithmListStack
-        algorithmListScroll.hasVerticalScroller = true
-        algorithmListScroll.hasHorizontalScroller = false
-        algorithmListScroll.autohidesScrollers = true
-        algorithmListScroll.drawsBackground = false
-        algorithmListScroll.translatesAutoresizingMaskIntoConstraints = false
+        algorithmListStack.setHuggingPriority(.required, for: .vertical)
+        algorithmListStack.setContentCompressionResistancePriority(.required, for: .vertical)
         fffParsingCheckbox.font = NSFont.systemFont(ofSize: 12)
         fffParsingCheckbox.contentTintColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         dustRemovalCheckbox.font = NSFont.systemFont(ofSize: 12)
@@ -893,23 +879,42 @@ final class LegacyWindowController: NSViewController {
         let shortcutLabel = label("快捷键：方向键移动全部红框 · A 新增 · S/Delete 删除 · D 放大镜 · 滚轮缩放", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
         shortcutLabel.maximumNumberOfLines = 4
         shortcutLabel.lineBreakMode = .byWordWrapping
+
+        let cropSection = sectionCard(
+            title: "裁切框",
+            views: [toolRow],
+            tone: 0
+        )
+        let nudgeSection = sectionCard(
+            title: "统一微调",
+            views: [nudgeRow],
+            tone: 1
+        )
+        let algorithmSection = sectionCard(
+            title: "算法结果",
+            views: [algorithmListStack],
+            tone: 2
+        )
+        let exportSection = sectionCard(
+            title: "导出设置",
+            views: [
+                fffParsingCheckbox,
+                formatPopup,
+                dustRow,
+                dustStrengthSlider,
+                exportRow,
+                outputLabel
+            ],
+            tone: 1
+        )
+
         let stack = NSStackView(views: [
             title,
             separator(),
-            label("裁切框", size: 12, weight: .semibold),
-            toolRow,
-            label("统一微调", size: 12, weight: .semibold),
-            nudgeRow,
-            label("算法结果", size: 12, weight: .semibold),
-            algorithmListScroll,
-            label("导出格式", size: 12, weight: .semibold),
-            fffParsingCheckbox,
-            formatPopup,
-            dustRow,
-            dustStrengthSlider,
-            exportRow,
-            outputLabel,
-            separator(),
+            cropSection,
+            nudgeSection,
+            algorithmSection,
+            exportSection,
             shortcutLabel,
         ])
         stack.orientation = .vertical
@@ -921,15 +926,76 @@ final class LegacyWindowController: NSViewController {
             stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
             stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
             stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
-            algorithmListScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            algorithmListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 145),
-            algorithmListStack.widthAnchor.constraint(equalTo: algorithmListScroll.contentView.widthAnchor),
-            formatPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            dustStrengthSlider.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            exportRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: box.bottomAnchor, constant: -8),
+            cropSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            nudgeSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            exportSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmListStack.widthAnchor.constraint(equalTo: algorithmSection.widthAnchor, constant: -16),
+            algorithmListStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 183),
+            formatPopup.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
+            dustStrengthSlider.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
+            exportRow.widthAnchor.constraint(lessThanOrEqualTo: exportSection.widthAnchor, constant: -16),
             shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         return box
+    }
+
+    private func sectionCard(title: String, views: [NSView], tone: Int) -> NSView {
+        let card = NSView()
+        card.identifier = NSUserInterfaceItemIdentifier("sectionTone\(tone)")
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 5
+        card.layer?.borderWidth = 1
+
+        let content = NSStackView(views: views)
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(content)
+        if title.isEmpty {
+            NSLayoutConstraint.activate([
+                content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+                content.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+                content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            ])
+        } else {
+            let heading = label(title, size: 11, weight: .semibold)
+            card.addSubview(heading)
+            NSLayoutConstraint.activate([
+                heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -8),
+                heading.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
+                content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+                content.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 6),
+                content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            ])
+        }
+        applySectionTone(card, tone: tone)
+        return card
+    }
+
+    private func applySectionTone(_ view: NSView, tone: Int) {
+        let darkColors = [
+            NSColor(calibratedWhite: 0.115, alpha: 0.72),
+            NSColor(calibratedWhite: 0.185, alpha: 0.72),
+            NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.21, alpha: 0.82)
+        ]
+        let lightColors = [
+            NSColor(calibratedWhite: 0.91, alpha: 1),
+            NSColor(calibratedWhite: 0.965, alpha: 1),
+            NSColor(calibratedRed: 0.88, green: 0.92, blue: 0.97, alpha: 1)
+        ]
+        let colors = usesLightTheme ? lightColors : darkColors
+        view.layer?.backgroundColor = colors[min(max(tone, 0), colors.count - 1)].cgColor
+        view.layer?.borderColor = (usesLightTheme
+            ? NSColor.black.withAlphaComponent(0.12)
+            : NSColor.white.withAlphaComponent(0.09)).cgColor
     }
 
     private func makeBottomPanel() -> NSView {
@@ -1015,8 +1081,20 @@ final class LegacyWindowController: NSViewController {
             panel.layer?.backgroundColor = panelColor.cgColor
             panel.layer?.borderColor = borderColor.cgColor
         }
+        updateSectionTones(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
+    }
+
+    private func updateSectionTones(in root: NSView) {
+        for subview in root.subviews {
+            if let raw = subview.identifier?.rawValue,
+               raw.hasPrefix("sectionTone"),
+               let tone = Int(raw.dropFirst("sectionTone".count)) {
+                applySectionTone(subview, tone: tone)
+            }
+            updateSectionTones(in: subview)
+        }
     }
 
     private func setTextColors(in root: NSView, textColor: NSColor, mutedColor: NSColor) {
@@ -1842,6 +1920,7 @@ final class LegacyCanvasView: NSView {
             if isInverted, invertedImage == nil {
                 invertedImage = Self.invertedPreview(from: image)
             }
+            displayInvertedPreviewImage = nil
             wheelInvertedPreviewImage = nil
             needsDisplay = true
         }
@@ -1868,6 +1947,8 @@ final class LegacyCanvasView: NSView {
 
     private var image: NSImage?
     private var invertedImage: NSImage?
+    private var displayPreviewImage: NSImage?
+    private var displayInvertedPreviewImage: NSImage?
     private var wheelPreviewImage: NSImage?
     private var wheelInvertedPreviewImage: NSImage?
     private var activeHandle: CropHandle?
@@ -1888,6 +1969,10 @@ final class LegacyCanvasView: NSView {
     private var lastPanDisplayTime: TimeInterval = 0
     private var lastCropDisplayTime: TimeInterval = 0
     private var pendingCropDirtyRect = CGRect.null
+    private let usesMojaveRenderingPath: Bool = {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return version.majorVersion == 10 && version.minorVersion <= 14
+    }()
 
     var currentTemplateRect: CGRect? {
         selectedIndex.flatMap { crops.indices.contains($0) ? crops[$0].rect : nil } ?? crops.first?.rect
@@ -1908,7 +1993,14 @@ final class LegacyCanvasView: NSView {
     func setImage(_ image: NSImage, crops: [LegacyCrop], rotationDegrees: Int, inverted: Bool) {
         self.image = image
         invertedImage = nil
-        wheelPreviewImage = Self.downsampledPreview(from: image, maxPixelSize: 1800)
+        displayPreviewImage = usesMojaveRenderingPath
+            ? Self.downsampledPreview(from: image, maxPixelSize: 2800)
+            : nil
+        displayInvertedPreviewImage = nil
+        wheelPreviewImage = Self.downsampledPreview(
+            from: image,
+            maxPixelSize: usesMojaveRenderingPath ? 1200 : 1800
+        )
         wheelInvertedPreviewImage = nil
         self.crops = crops
         previewRotationDegrees = normalizedRotation(rotationDegrees)
@@ -1927,7 +2019,14 @@ final class LegacyCanvasView: NSView {
         guard let image else { return }
         let displayImage = isInverted ? (invertedImage ?? image) : image
         let isInteracting = isWheelZooming || isPanning || activeIndex != nil
-        let drawnImage = isInteracting ? wheelPreview(for: displayImage, inverted: isInverted) : displayImage
+        let drawnImage: NSImage
+        if isInteracting {
+            drawnImage = wheelPreview(for: displayImage, inverted: isInverted)
+        } else if usesMojaveRenderingPath {
+            drawnImage = settledPreview(for: displayImage, inverted: isInverted)
+        } else {
+            drawnImage = displayImage
+        }
         let rect = imageContentRect()
         NSGraphicsContext.current?.imageInterpolation = isInteracting ? .low : .high
         NSGraphicsContext.current?.saveGraphicsState()
@@ -1953,11 +2052,30 @@ final class LegacyCanvasView: NSView {
         if !inverted, let wheelPreviewImage {
             return wheelPreviewImage
         }
-        let preview = Self.downsampledPreview(from: image, maxPixelSize: 1800) ?? image
+        let preview = Self.downsampledPreview(
+            from: image,
+            maxPixelSize: usesMojaveRenderingPath ? 1200 : 1800
+        ) ?? image
         if inverted {
             wheelInvertedPreviewImage = preview
         } else {
             wheelPreviewImage = preview
+        }
+        return preview
+    }
+
+    private func settledPreview(for image: NSImage, inverted: Bool) -> NSImage {
+        if inverted, let displayInvertedPreviewImage {
+            return displayInvertedPreviewImage
+        }
+        if !inverted, let displayPreviewImage {
+            return displayPreviewImage
+        }
+        let preview = Self.downsampledPreview(from: image, maxPixelSize: 2800) ?? image
+        if inverted {
+            displayInvertedPreviewImage = preview
+        } else {
+            displayPreviewImage = preview
         }
         return preview
     }
@@ -1998,7 +2116,8 @@ final class LegacyCanvasView: NSView {
                 x: startPanOffset.x + point.x - startPoint.x,
                 y: startPanOffset.y + point.y - startPoint.y
             )
-            if event.timestamp - lastPanDisplayTime >= 1.0 / 60.0 {
+            let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+            if event.timestamp - lastPanDisplayTime >= frameInterval {
                 lastPanDisplayTime = event.timestamp
                 needsDisplay = true
             }
@@ -2027,7 +2146,8 @@ final class LegacyCanvasView: NSView {
         let newDirty = cropDirtyRect(crops[activeIndex], imageRect: imgRect).union(newLens)
         let dirty = oldDirty.union(newDirty).insetBy(dx: -8, dy: -8)
         pendingCropDirtyRect = pendingCropDirtyRect.isNull ? dirty : pendingCropDirtyRect.union(dirty)
-        if event.timestamp - lastCropDisplayTime >= 1.0 / 60.0 {
+        let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+        if event.timestamp - lastCropDisplayTime >= frameInterval {
             lastCropDisplayTime = event.timestamp
             setNeedsDisplay(pendingCropDirtyRect)
             pendingCropDirtyRect = .null
@@ -2104,11 +2224,12 @@ final class LegacyCanvasView: NSView {
         let delta = event.scrollingDeltaY == 0 ? event.scrollingDeltaX : event.scrollingDeltaY
         guard delta != 0 else { return }
         isWheelZooming = true
-        let factor = pow(CGFloat(1.0018), -delta)
+        let factor = pow(CGFloat(1.0018), delta)
         suppressZoomRedraw = true
         zoom = min(8, max(0.25, zoom * factor))
         suppressZoomRedraw = false
-        if event.timestamp - lastWheelZoomDisplayTime >= 1.0 / 60.0 {
+        let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+        if event.timestamp - lastWheelZoomDisplayTime >= frameInterval {
             lastWheelZoomDisplayTime = event.timestamp
             needsDisplay = true
         }
