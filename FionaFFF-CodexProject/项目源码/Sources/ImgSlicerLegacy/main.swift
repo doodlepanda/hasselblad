@@ -667,6 +667,64 @@ final class LegacyWindowController: NSViewController {
         return image
     }
 
+    private func exportPathListIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+        for y in [15.5, 10.8, 6.1] as [CGFloat] {
+            NSBezierPath(ovalIn: NSRect(x: 4, y: y - 1.2, width: 2.4, height: 2.4)).fill()
+            let line = NSBezierPath()
+            line.lineWidth = 1.7
+            line.lineCapStyle = .round
+            line.move(to: NSPoint(x: 9, y: y))
+            line.line(to: NSPoint(x: 18, y: y))
+            line.stroke()
+        }
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    private func minusCropIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        let line = NSBezierPath()
+        line.lineWidth = 2.4
+        line.lineCapStyle = .round
+        line.move(to: NSPoint(x: 6, y: 11))
+        line.line(to: NSPoint(x: 16, y: 11))
+        line.stroke()
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    private func trashAllIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        let lid = NSBezierPath()
+        lid.lineWidth = 1.5
+        lid.move(to: NSPoint(x: 6, y: 16))
+        lid.line(to: NSPoint(x: 16, y: 16))
+        lid.move(to: NSPoint(x: 9, y: 18))
+        lid.line(to: NSPoint(x: 13, y: 18))
+        lid.stroke()
+        let bin = NSBezierPath(roundedRect: NSRect(x: 7, y: 5, width: 8, height: 10), xRadius: 1.5, yRadius: 1.5)
+        bin.lineWidth = 1.5
+        bin.stroke()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 6.5, weight: .bold),
+            .foregroundColor: NSColor.black
+        ]
+        ("ALL" as NSString).draw(at: NSPoint(x: 4.2, y: 1.5), withAttributes: attrs)
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
     private func loupeIcon() -> NSImage {
         let image = NSImage(size: NSSize(width: 22, height: 22))
         image.lockFocus()
@@ -774,7 +832,7 @@ final class LegacyWindowController: NSViewController {
         stack.alignment = .leading
         stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let importButton = imageButton(importIcon(), title: "导入文件", action: #selector(importFile), help: "导入图片文件或文件夹")
+        let importButton = imageButton(exportPathListIcon(), title: "选择导出路径", action: #selector(chooseOutput), help: "选择导出文件夹")
         let exportButton = iconWideButton("导出", iconName: "NSShareTemplate", action: #selector(exportCrops), help: "按当前红框导出")
         let actions = NSStackView(views: [importButton, exportButton])
         actions.orientation = .horizontal
@@ -859,7 +917,8 @@ final class LegacyWindowController: NSViewController {
         let title = label("任务列表", size: 13, weight: .semibold)
         let taskCount = label("0", size: 10, weight: .medium, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         taskCount.identifier = NSUserInterfaceItemIdentifier("taskCountLabel")
-        let titleRow = NSStackView(views: [title, taskCount])
+        let openTaskFolderButton = imageButton(revealIcon(), action: #selector(openCurrentTaskFolder), help: "打开当前任务文件夹")
+        let titleRow = NSStackView(views: [title, taskCount, openTaskFolderButton])
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
         titleRow.distribution = .fill
@@ -908,8 +967,9 @@ final class LegacyWindowController: NSViewController {
         let box = panel()
         let title = label("参数设置", size: 15, weight: .bold)
         let add = iconButton("NSAddTemplate", action: #selector(addBox), help: "新增红框")
-        let deleteCrop = iconButton("NSTrashFull", action: #selector(deleteCurrentCrop), help: "删除当前选中的红框")
-        let toolRow = NSStackView(views: [add, deleteCrop])
+        let deleteCrop = imageButton(minusCropIcon(), action: #selector(deleteCurrentCrop), help: "删除当前选中的红框")
+        let clearAllCrops = imageButton(trashAllIcon(), action: #selector(clearCurrentCrops), help: "删除当前预览图所有选框")
+        let toolRow = NSStackView(views: [add, deleteCrop, clearAllCrops])
         toolRow.orientation = .horizontal
         toolRow.alignment = .centerY
         toolRow.spacing = 9
@@ -921,12 +981,6 @@ final class LegacyWindowController: NSViewController {
         nudgeRow.orientation = .horizontal
         nudgeRow.alignment = .centerY
         nudgeRow.spacing = 6
-        let choose = imageButton(outputFolderIcon(), action: #selector(chooseOutput), help: "选择导出文件夹")
-        let export = iconButton("NSShareTemplate", action: #selector(exportCrops), help: "导出当前任务")
-        let exportRow = NSStackView(views: [choose, export])
-        exportRow.orientation = .horizontal
-        exportRow.alignment = .centerY
-        exportRow.spacing = 6
         formatPopup.translatesAutoresizingMaskIntoConstraints = false
         algorithmListStack.orientation = .vertical
         algorithmListStack.alignment = .leading
@@ -978,7 +1032,6 @@ final class LegacyWindowController: NSViewController {
                 formatPopup,
                 dustRow,
                 dustStrengthSlider,
-                exportRow,
                 outputLabel
             ],
             tone: 1
@@ -1011,7 +1064,6 @@ final class LegacyWindowController: NSViewController {
             algorithmListStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 183),
             formatPopup.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
             dustStrengthSlider.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
-            exportRow.widthAnchor.constraint(lessThanOrEqualTo: exportSection.widthAnchor, constant: -16),
             shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         return box
@@ -1550,13 +1602,10 @@ final class LegacyWindowController: NSViewController {
                 : NSColor(calibratedWhite: 0.58, alpha: 1)
             detail.translatesAutoresizingMaskIntoConstraints = false
 
-            let stop = iconButton("NSStopProgressTemplate", action: #selector(stopTaskFromList(_:)), help: "终止这个任务")
-            stop.tag = index
-            stop.isEnabled = !task.isStopped
             let remove = iconButton("NSTrashFull", action: #selector(deleteTaskFromList(_:)), help: "删除这个任务")
             remove.tag = index
 
-            for item in [select, name, detail, stop, remove] {
+            for item in [select, name, detail, remove] {
                 row.addSubview(item)
             }
             taskListStack.addArrangedSubview(row)
@@ -1568,21 +1617,16 @@ final class LegacyWindowController: NSViewController {
                 select.topAnchor.constraint(equalTo: row.topAnchor),
                 select.bottomAnchor.constraint(equalTo: row.bottomAnchor),
                 name.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 9),
-                name.trailingAnchor.constraint(equalTo: stop.leadingAnchor, constant: -6),
+                name.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -6),
                 name.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
                 detail.leadingAnchor.constraint(equalTo: name.leadingAnchor),
                 detail.trailingAnchor.constraint(equalTo: name.trailingAnchor),
                 detail.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 3),
-                stop.widthAnchor.constraint(equalToConstant: 26),
-                stop.heightAnchor.constraint(equalToConstant: 24),
-                stop.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                stop.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -4),
                 remove.widthAnchor.constraint(equalToConstant: 26),
                 remove.heightAnchor.constraint(equalToConstant: 24),
                 remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
                 remove.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -7)
             ])
-            row.addSubview(stop, positioned: .above, relativeTo: select)
             row.addSubview(remove, positioned: .above, relativeTo: select)
         }
         refreshThemeText(in: taskListStack)
@@ -1790,6 +1834,15 @@ final class LegacyWindowController: NSViewController {
         let folder = photo.url.deletingLastPathComponent()
         NSWorkspace.shared.selectFile(photo.url.path, inFileViewerRootedAtPath: folder.path)
         statusLabel.stringValue = "已打开当前图片所在文件夹。"
+    }
+
+    @objc private func openCurrentTaskFolder() {
+        guard let task = selectedTask else {
+            statusLabel.stringValue = "当前没有选中的任务。"
+            return
+        }
+        NSWorkspace.shared.open(task.rootURL)
+        statusLabel.stringValue = "已打开当前任务文件夹。"
     }
 
     @objc private func deleteSelectedTask() {
