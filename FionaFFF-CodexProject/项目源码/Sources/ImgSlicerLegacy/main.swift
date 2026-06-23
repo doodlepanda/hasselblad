@@ -3168,11 +3168,16 @@ enum LegacyFrameDetector {
 
         let negativeRects = detectNegativeFilmRects(url: url)
         if negativeRects.count > 1 {
+            let isCompleteTwoBySix = negativeRects.count == 12 && hasCompleteTwoRowSixCoverage(negativeRects)
+            let partialStripBonus = negativeRects.count >= 3 && negativeRects.count < 12 ? 0.34 : 0
             candidates.append(LegacyDetectionCandidate(
-                title: "浅色/黑色片距",
-                detail: "负片胶片片距检测",
+                title: isCompleteTwoBySix ? "浅色/黑色片距" : "按实际张数识别",
+                detail: isCompleteTwoBySix ? "完整 2×6 负片胶片片距检测" : "不补齐空位，按实际可见画面检测",
                 rects: negativeRects,
-                score: scoreCandidate(negativeRects, expectedCount: 12)
+                score: scoreCandidate(
+                    negativeRects,
+                    expectedCount: isCompleteTwoBySix ? 12 : nil
+                ) + partialStripBonus
             ))
         }
         let templateCrops = detectTemplatePositionCrops(url: url, template: template)
@@ -3369,14 +3374,17 @@ enum LegacyFrameDetector {
 
         let smoothedRows = movingAverage(rowActivity, window: max(3, height / 160))
         let rowThreshold = max(0.05, min(0.35, median(smoothedRows) + standardDeviation(smoothedRows) * 0.25))
-        let filmRows = mergeCloseSegments(
+        var filmRows = mergeCloseSegments(
             thresholdSegments(values: smoothedRows, threshold: rowThreshold, minimumSize: max(12, height / 18), lessThan: false),
             maxGap: max(4, height / 120)
         ).filter { segment in
             let ratio = Double(segment.size) / Double(height)
-            return ratio >= 0.12 && ratio <= 0.55
+            return ratio >= 0.12 && ratio <= (Double(width) / Double(height) >= 3.0 ? 0.96 : 0.55)
         }
 
+        if filmRows.isEmpty, Double(width) / Double(height) >= 3.0 {
+            filmRows = [IntSegment(start: 0, end: height)]
+        }
         guard !filmRows.isEmpty else { return [] }
         var rects: [CGRect] = []
         for row in filmRows {
@@ -3388,10 +3396,11 @@ enum LegacyFrameDetector {
 
         let filtered = mergeNormalizedRects(rects, overlapThreshold: 0.42).filter { rect in
             let aspect = rect.width / max(rect.height, 0.001)
+            let minimumAspect: CGFloat = Double(width) / Double(height) >= 3.0 ? 0.16 : 0.32
             return rect.area > 0.006
                 && rect.width > 0.055
                 && rect.height > 0.10
-                && aspect >= 0.32
+                && aspect >= minimumAspect
                 && aspect <= 3.8
                 && !(rect.width > 0.92 && rect.height > 0.70)
         }
@@ -3455,14 +3464,15 @@ enum LegacyFrameDetector {
             }
             .sorted { $0.start < $1.start }
 
-        let estimatedCount = max(1, Int(round(Double(width) / (Double(max(1, rowHeight)) * 1.55))))
         let yRange = horizontalFrameYRange(IntSegment(start: yStart, end: yEnd), luminances: luminances, width: width, height: height)
         let activeRange = horizontalFrameContentXRange(yStart: yRange.start, yEnd: yRange.end, luminances: luminances, width: width)
             ?? horizontalFilmXRange(yStart: yRange.start, yEnd: yRange.end, luminances: luminances, width: width)
             ?? IntSegment(start: 0, end: width)
+        let activeWidth = max(1, activeRange.size)
+        let estimatedCount = max(1, Int(round(Double(activeWidth) / (Double(max(1, rowHeight)) * 1.55))))
         if estimatedCount >= 5 && estimatedCount <= 7 {
             return keepConsistentNegativeFrames(horizontalRegularFrames(
-                count: 6,
+                count: estimatedCount,
                 xStart: activeRange.start,
                 xEnd: activeRange.end,
                 yStart: yRange.start,
@@ -4447,8 +4457,7 @@ enum LegacyFrameDetector {
             width: gray.width,
             height: gray.height
         )
-        if separatedRects.count == 12,
-           hasCompleteTwoRowSixCoverage(separatedRects) {
+        if separatedRects.count >= 2 && separatedRects.count <= 12 {
             return separatedRects
                 .sortedForReadingOrder()
                 .map { CGPoint(x: $0.midX, y: $0.midY) }
