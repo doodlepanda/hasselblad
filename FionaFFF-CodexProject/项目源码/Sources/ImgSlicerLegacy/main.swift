@@ -3752,7 +3752,6 @@ enum LegacyFrameDetector {
             ?? horizontalFilmXRange(yStart: yRange.start, yEnd: yRange.end, luminances: luminances, width: width)
             ?? IntSegment(start: 0, end: width)
         let activeWidth = max(1, activeRange.size)
-        let estimatedCount = max(1, Int(round(Double(activeWidth) / (Double(max(1, rowHeight)) * 1.55))))
 
         var boundaries: [IntSegment] = []
         if let first = separators.first, first.start > max(8, width / 24) {
@@ -3764,14 +3763,22 @@ enum LegacyFrameDetector {
         }
 
         var frames: [CGRect] = []
+        var separatorSlotCount = 0
         for pair in zip(boundaries, boundaries.dropFirst()) {
             let left = pair.0.end
             let right = pair.1.start
             guard right - left >= max(32, width / 18) else { continue }
+            separatorSlotCount += 1
             let meanBody = segmentMean(bodyScore, IntSegment(start: left, end: right))
             guard meanBody > 0.18 else { continue }
             frames.append(refineNegativeFrameRect(xStart: left, xEnd: right, yStart: yStart, yEnd: yEnd, luminances: luminances, width: width, height: height))
         }
+
+        let estimatedCount = estimateHorizontalFrameCount(
+            activeWidth: activeWidth,
+            rowHeight: yRange.size,
+            separatorSlotCount: separatorSlotCount >= 3 && separatorSlotCount <= 12 ? separatorSlotCount : nil
+        )
 
         let contentFrames = horizontalContentFrames(
             bodyScore: bodyScore,
@@ -3834,6 +3841,19 @@ enum LegacyFrameDetector {
             return keepConsistentNegativeFrames(regularFrames)
         }
         return keepConsistentNegativeFrames(frames)
+    }
+
+    private static func estimateHorizontalFrameCount(activeWidth: Int, rowHeight: Int, separatorSlotCount: Int?) -> Int {
+        guard activeWidth > 0, rowHeight > 0 else { return separatorSlotCount ?? 1 }
+        if let separatorSlotCount, separatorSlotCount >= 5 && separatorSlotCount <= 12 {
+            return separatorSlotCount
+        }
+        let ratio = Double(activeWidth) / Double(rowHeight)
+        let estimated = Int(round(ratio / 1.55))
+        if let separatorSlotCount, separatorSlotCount >= 3 && separatorSlotCount <= 12 {
+            return abs(separatorSlotCount - estimated) <= 1 ? separatorSlotCount : estimated
+        }
+        return max(1, estimated)
     }
 
     private static func horizontalFramesLookNarrow(_ rects: [CGRect], rowHeight: Int, imageWidth: Int) -> Bool {
