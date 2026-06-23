@@ -2074,9 +2074,9 @@ final class LegacyCanvasView: NSView {
         dirtyRect.fill()
         guard let image else { return }
         let displayImage = isInverted ? (invertedImage ?? image) : image
-        let isInteracting = isWheelZooming || isPanning || activeIndex != nil
+        let usesFastInteractionPreview = isWheelZooming || isPanning
         let drawnImage: NSImage
-        if isInteracting {
+        if usesFastInteractionPreview {
             drawnImage = wheelPreview(for: displayImage, inverted: isInverted)
         } else if usesMojaveRenderingPath {
             drawnImage = settledPreview(for: displayImage, inverted: isInverted)
@@ -2084,7 +2084,7 @@ final class LegacyCanvasView: NSView {
             drawnImage = displayImage
         }
         let rect = imageContentRect()
-        NSGraphicsContext.current?.imageInterpolation = isInteracting ? .low : .high
+        NSGraphicsContext.current?.imageInterpolation = usesFastInteractionPreview ? .low : .high
         NSGraphicsContext.current?.saveGraphicsState()
         imageTransform(for: rect).concat()
         drawnImage.draw(in: rect)
