@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
 APP_VERSION="0.35.2"
-APP_BUILD="72"
+APP_BUILD="73"
 RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -115,9 +115,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-72</string>
+  <string>0.35.2-legacy-73</string>
   <key>CFBundleVersion</key>
-  <string>72</string>
+  <string>73</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>
@@ -161,6 +161,9 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 - DMG：$RELEASE_NAME.dmg
 
 本次更新：
+- 底部文件栏取消图片缩略图，只显示系统文件图标、文件名和删除按钮，不再为每个文件解码预览图。
+- 删除非当前文件时不再重新加载当前大图，减少删除和列表刷新的等待；底栏高度同步缩小，扩大中央画布。
+- 左侧任务列表固定按导入顺序从上到下排列。
 - 左侧工具栏按文件操作、自动识别、旋转、缩放、应用与查看工具重新排列，移除当前图片下拉菜单，任务列表使用剩余纵向空间。
 - 右侧第一排只保留新增和删除当前选框，第二排统一微调；算法候选改为直接可点击列表，显示算法名称、识别张数和可信度。
 - 键盘方向键绑定为移动当前图片全部红框，支持按住连续微调。

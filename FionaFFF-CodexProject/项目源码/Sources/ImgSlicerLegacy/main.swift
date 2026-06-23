@@ -286,6 +286,10 @@ final class LegacyFilmstripTileView: NSView {
     }
 }
 
+final class LegacyFlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 final class LegacyTaskRowView: NSView {
     var isSelected = false {
         didSet { needsDisplay = true }
@@ -325,7 +329,7 @@ final class LegacyWindowController: NSViewController {
     private let algorithmListScroll = NSScrollView()
     private let algorithmListStack = NSStackView()
     private let taskListScroll = NSScrollView()
-    private let taskListStack = NSStackView()
+    private let taskListStack = LegacyFlippedStackView()
     private let photoPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let fffParsingCheckbox = NSButton(checkboxWithTitle: "解析 FFF/3F 文件", target: nil, action: nil)
@@ -334,8 +338,6 @@ final class LegacyWindowController: NSViewController {
     private let dustStrengthLabel = NSTextField(labelWithString: "强度 35")
     private let filmstripScroll = NSScrollView()
     private let filmstripStack = NSStackView()
-    private let thumbnailQueue = DispatchQueue(label: "fiona.spotter.legacy.thumbnails", qos: .userInitiated)
-    private var thumbnailCache: [String: NSImage] = [:]
     private var tasks: [LegacyTask] = []
     private var selectedTaskIndex = 0
     private var selectedPhotoIndex = 0
@@ -456,7 +458,7 @@ final class LegacyWindowController: NSViewController {
             bottomPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             bottomPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
             bottomPanel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
-            bottomPanel.heightAnchor.constraint(equalToConstant: 170)
+            bottomPanel.heightAnchor.constraint(equalToConstant: 112)
         ])
         applyTheme()
         LegacyLaunchLog.write("loadView finished")
@@ -692,7 +694,7 @@ final class LegacyWindowController: NSViewController {
         bar.layer?.backgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1).cgColor
 
         let title = label("FionaFFF", size: 15, weight: .semibold, color: NSColor(calibratedWhite: 0.92, alpha: 1))
-        let subtitle = label("Mojave build 0.35.2-72", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
+        let subtitle = label("Mojave build 0.35.2-73", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         let stack = NSStackView(views: [title, subtitle])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -968,7 +970,7 @@ final class LegacyWindowController: NSViewController {
             stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
             filmstripScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            filmstripScroll.heightAnchor.constraint(equalToConstant: 132)
+            filmstripScroll.heightAnchor.constraint(equalToConstant: 54)
         ])
         return box
     }
@@ -1393,15 +1395,13 @@ final class LegacyWindowController: NSViewController {
         guard let task = selectedTask else { return }
         for (index, photo) in task.photos.enumerated() {
             let imageView = NSImageView()
-            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.image = NSWorkspace.shared.icon(forFile: photo.url.path)
+            imageView.imageScaling = .scaleProportionallyDown
             imageView.imageAlignment = .alignCenter
             imageView.translatesAutoresizingMaskIntoConstraints = false
-            imageView.wantsLayer = true
-            imageView.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1).cgColor
-            imageView.layer?.cornerRadius = 2
 
             let titleLabel = NSTextField(labelWithString: photo.name)
-            titleLabel.alignment = .center
+            titleLabel.alignment = .left
             titleLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
             titleLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
             titleLabel.lineBreakMode = .byTruncatingMiddle
@@ -1427,42 +1427,26 @@ final class LegacyWindowController: NSViewController {
             tile.addSubview(button)
             tile.addSubview(deleteButton)
             NSLayoutConstraint.activate([
-                tile.widthAnchor.constraint(equalToConstant: 184),
-                tile.heightAnchor.constraint(equalToConstant: 128),
+                tile.widthAnchor.constraint(equalToConstant: 206),
+                tile.heightAnchor.constraint(equalToConstant: 44),
                 imageView.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
-                imageView.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -8),
-                imageView.topAnchor.constraint(equalTo: tile.topAnchor, constant: 8),
-                imageView.heightAnchor.constraint(equalToConstant: 88),
-                titleLabel.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
-                titleLabel.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -8),
-                titleLabel.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 6),
+                imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                imageView.widthAnchor.constraint(equalToConstant: 28),
+                imageView.heightAnchor.constraint(equalToConstant: 28),
+                titleLabel.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
+                titleLabel.trailingAnchor.constraint(equalTo: deleteButton.leadingAnchor, constant: -6),
+                titleLabel.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
                 button.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
                 button.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -34),
                 button.topAnchor.constraint(equalTo: tile.topAnchor, constant: 4),
                 button.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -4),
-                deleteButton.widthAnchor.constraint(equalToConstant: 24),
-                deleteButton.heightAnchor.constraint(equalToConstant: 24),
-                deleteButton.topAnchor.constraint(equalTo: tile.topAnchor, constant: 7),
-                deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -7)
+                deleteButton.widthAnchor.constraint(equalToConstant: 22),
+                deleteButton.heightAnchor.constraint(equalToConstant: 22),
+                deleteButton.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -6)
             ])
             tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
             filmstripStack.addArrangedSubview(tile)
-            let taskIndex = selectedTaskIndex
-            let cacheKey = photoKey(photo.url)
-            if let cached = thumbnailCache[cacheKey] {
-                imageView.image = cached
-                continue
-            }
-            thumbnailQueue.async { [weak self, weak imageView] in
-                guard let thumb = LegacyImageIO.thumbnail(url: photo.url, maxPixelSize: 260) else { return }
-                DispatchQueue.main.async {
-                    guard let self = self,
-                          self.selectedTaskIndex == taskIndex,
-                          imageView?.superview != nil else { return }
-                    self.thumbnailCache[cacheKey] = thumb
-                    imageView?.image = thumb
-                }
-            }
         }
         updateFilmstripSelection()
     }
@@ -1526,11 +1510,11 @@ final class LegacyWindowController: NSViewController {
         let removedPhoto = tasks[selectedTaskIndex].photos[sender.tag]
         let name = removedPhoto.name
         detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(removedPhoto.url))
-        thumbnailCache.removeValue(forKey: photoKey(removedPhoto.url))
         if sender.tag != selectedPhotoIndex {
             saveCurrentCrops()
         }
         let previousSelection = selectedPhotoIndex
+        let removedCurrentPhoto = sender.tag == previousSelection
         tasks[selectedTaskIndex].photos.remove(at: sender.tag)
         if tasks[selectedTaskIndex].photos.isEmpty {
             let taskName = tasks[selectedTaskIndex].name
@@ -1551,7 +1535,13 @@ final class LegacyWindowController: NSViewController {
         rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
-        loadSelectedPhoto()
+        if removedCurrentPhoto || tasks.isEmpty {
+            loadSelectedPhoto()
+        } else {
+            photoPopup.selectItem(at: selectedPhotoIndex)
+            updateFilmstripSelection()
+            refreshSummary()
+        }
     }
 
     @objc private func stopSelectedTask() {
