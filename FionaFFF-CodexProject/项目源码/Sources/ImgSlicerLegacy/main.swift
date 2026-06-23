@@ -2869,13 +2869,47 @@ enum LegacyFrameDetector {
             width: width,
             height: height
         )
+
+        let regularFrames: [CGRect]
+        let internalSeparators: [IntSegment]
+        let hasRegularSeparatorEvidence: Bool
+        if estimatedCount >= 3 && estimatedCount <= 12 {
+            regularFrames = horizontalRegularFrames(
+                count: estimatedCount,
+                xStart: activeRange.start,
+                xEnd: activeRange.end,
+                yStart: yRange.start,
+                yEnd: yRange.end,
+                separators: separators,
+                luminances: luminances,
+                width: width,
+                height: height
+            )
+            internalSeparators = separators.filter {
+                $0.mid > activeRange.start && $0.mid < activeRange.end
+            }
+            hasRegularSeparatorEvidence = internalSeparators.count >= max(2, estimatedCount - 2)
+        } else {
+            regularFrames = []
+            internalSeparators = []
+            hasRegularSeparatorEvidence = false
+        }
+
+        if hasRegularSeparatorEvidence,
+           regularFrames.count >= 5,
+           regularFrames.count >= frames.count,
+           horizontalFramesAreNotNarrow(regularFrames, rowHeight: yRange.size, imageWidth: width) {
+            return keepConsistentNegativeFrames(regularFrames)
+        }
+
         if !contentFrames.isEmpty, contentFrames.count <= 4 {
             return contentFrames
         }
         if !frames.isEmpty, frames.count <= 4 {
             return frames
         }
-        if contentFrames.count >= 5, contentFrames.count <= 12 {
+        if contentFrames.count >= 5, contentFrames.count <= 12,
+           !horizontalFramesLookNarrow(contentFrames, rowHeight: yRange.size, imageWidth: width) {
             return contentFrames
         }
 
@@ -2883,26 +2917,21 @@ enum LegacyFrameDetector {
             return keepConsistentNegativeFrames(frames)
         }
 
-        let regularFrames = horizontalRegularFrames(
-            count: estimatedCount,
-            xStart: activeRange.start,
-            xEnd: activeRange.end,
-            yStart: yRange.start,
-            yEnd: yRange.end,
-            separators: separators,
-            luminances: luminances,
-            width: width,
-            height: height
-        )
-        let internalSeparators = separators.filter {
-            $0.mid > activeRange.start && $0.mid < activeRange.end
-        }
-        let hasRegularSeparatorEvidence = internalSeparators.count >= max(2, estimatedCount - 2)
         if hasRegularSeparatorEvidence,
            (regularFrames.count > frames.count || (estimatedCount >= 5 && frames.count != estimatedCount)) {
             return keepConsistentNegativeFrames(regularFrames)
         }
         return keepConsistentNegativeFrames(frames)
+    }
+
+    private static func horizontalFramesLookNarrow(_ rects: [CGRect], rowHeight: Int, imageWidth: Int) -> Bool {
+        guard rects.count >= 5, rowHeight > 0 else { return false }
+        let medianPixelWidth = median(rects.map { Double($0.width) * Double(imageWidth) })
+        return medianPixelWidth / Double(rowHeight) < 0.78
+    }
+
+    private static func horizontalFramesAreNotNarrow(_ rects: [CGRect], rowHeight: Int, imageWidth: Int) -> Bool {
+        !horizontalFramesLookNarrow(rects, rowHeight: rowHeight, imageWidth: imageWidth)
     }
 
     private static func horizontalContentFrames(
