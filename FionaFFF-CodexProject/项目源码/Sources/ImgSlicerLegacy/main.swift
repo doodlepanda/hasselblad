@@ -2696,11 +2696,12 @@ enum LegacyFrameDetector {
             let luminances = gray.bytes.map { Double($0) / 255.0 }
             let strictRects = detectTwoRowSixFrameRects(luminances: luminances, width: gray.width, height: gray.height)
             if strictRects.count == 12 {
+                let hasCompleteCoverage = hasCompleteTwoRowSixCoverage(strictRects)
                 candidates.append(LegacyDetectionCandidate(
                     title: "2x6固定胶片",
-                    detail: "两行六张强约束",
+                    detail: hasCompleteCoverage ? "两行六张完整覆盖" : "两行六张强约束（覆盖不完整）",
                     rects: strictRects,
-                    score: scoreCandidate(strictRects, expectedCount: 12) + 0.18
+                    score: scoreCandidate(strictRects, expectedCount: 12) + (hasCompleteCoverage ? 0.26 : -0.24)
                 ))
             }
         }
@@ -2766,8 +2767,6 @@ enum LegacyFrameDetector {
             }
             .filter { !$0.rects.isEmpty }
             .sorted {
-                if $0.title == "中心投影", $1.title != "中心投影" { return true }
-                if $1.title == "中心投影", $0.title != "中心投影" { return false }
                 if abs($0.score - $1.score) > 0.001 { return $0.score > $1.score }
                 return $0.rects.count > $1.rects.count
             }
@@ -3066,6 +3065,42 @@ enum LegacyFrameDetector {
         let edgeInsetX = max(4, Int(round(Double(slotInsetX) * 0.70)))
         let topInset = max(5, Int(round(Double(rowHeight) * 0.055)))
         let bottomInset = max(4, Int(round(Double(rowHeight) * 0.035)))
+
+        let matchedSeparators = (1..<count).compactMap { boundaryIndex -> IntSegment? in
+            let expected = Double(boundedXStart) + Double(boundaryIndex) * step
+            return separators
+                .filter { separator in
+                    separator.mid > boundedXStart && separator.mid < boundedXEnd
+                        && abs(Double(separator.mid) - expected) <= step * 0.30
+                }
+                .min { abs(Double($0.mid) - expected) < abs(Double($1.mid) - expected) }
+        }
+        if matchedSeparators.count == count - 1,
+           Set(matchedSeparators.map(\.mid)).count == count - 1 {
+            let orderedSeparators = matchedSeparators.sorted { $0.mid < $1.mid }
+            var actualFrames: [CGRect] = []
+            for index in 0..<count {
+                let slotLeft = index == 0 ? boundedXStart : orderedSeparators[index - 1].end
+                let slotRight = index == count - 1 ? boundedXEnd : orderedSeparators[index].start
+                guard slotRight - slotLeft >= max(32, width / 18) else {
+                    actualFrames.removeAll()
+                    break
+                }
+                actualFrames.append(refineNegativeFrameRect(
+                    xStart: slotLeft,
+                    xEnd: slotRight,
+                    yStart: yStart,
+                    yEnd: yEnd,
+                    luminances: luminances,
+                    width: width,
+                    height: height
+                ))
+            }
+            if actualFrames.count == count {
+                return actualFrames
+            }
+        }
+
         return (0..<count).compactMap { index in
             let slotLeft = boundedXStart + Int(round(Double(index) * step))
             let slotRight = min(boundedXEnd, boundedXStart + Int(round(Double(index + 1) * step)))
@@ -3419,6 +3454,20 @@ enum LegacyFrameDetector {
             let areaRatio = rect.area / medianArea
             return areaRatio >= 0.42 && areaRatio <= 2.35
         }
+    }
+
+    private static func hasCompleteTwoRowSixCoverage(_ rects: [CGRect]) -> Bool {
+        let ordered = rects.map { $0.normalized }.sortedForReadingOrder()
+        guard ordered.count == 12 else { return false }
+        let rows = [Array(ordered.prefix(6)), Array(ordered.suffix(6))]
+        guard rows.allSatisfy({ $0.count == 6 }) else { return false }
+        let spans = rows.map { row -> CGRect in
+            row.dropFirst().reduce(row[0]) { $0.union($1) }
+        }
+        return spans.allSatisfy { span in
+            span.minX <= 0.065 && span.maxX >= 0.935 && span.width >= 0.87
+        } && abs(spans[0].minX - spans[1].minX) <= 0.055
+          && abs(spans[0].maxX - spans[1].maxX) <= 0.055
     }
 
     private static func scoreCandidate(_ rects: [CGRect], expectedCount: Int?) -> Double {
