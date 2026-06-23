@@ -768,25 +768,17 @@ final class LegacyWindowController: NSViewController {
         viewActions.alignment = .centerY
         viewActions.spacing = 6
 
-        let fileTitle = label("文件操作", size: 11, weight: .semibold)
-        let toolsTitle = label("画面与选框", size: 11, weight: .semibold)
-        let fileSection = NSStackView(views: [fileTitle, fileActions])
-        fileSection.orientation = .vertical
-        fileSection.alignment = .leading
-        fileSection.spacing = 6
-        fileSection.translatesAutoresizingMaskIntoConstraints = false
-
-        let toolsSection = NSStackView(views: [
-            toolsTitle,
+        let fileSection = sectionCard(title: "文件操作", views: [fileActions], tone: 0)
+        let toolsContent = NSStackView(views: [
             identifyButton,
             rotateActions,
             zoomActions,
             viewActions
         ])
-        toolsSection.orientation = .vertical
-        toolsSection.alignment = .leading
-        toolsSection.spacing = 8
-        toolsSection.translatesAutoresizingMaskIntoConstraints = false
+        toolsContent.orientation = .vertical
+        toolsContent.alignment = .leading
+        toolsContent.spacing = 8
+        let toolsSection = sectionCard(title: "画面与选框", views: [toolsContent], tone: 1)
 
         let title = label("任务列表", size: 13, weight: .semibold)
         let taskCount = label("0", size: 10, weight: .medium, color: NSColor(calibratedWhite: 0.62, alpha: 1))
@@ -807,31 +799,30 @@ final class LegacyWindowController: NSViewController {
         taskListScroll.autohidesScrollers = true
         taskListScroll.drawsBackground = false
         taskListScroll.translatesAutoresizingMaskIntoConstraints = false
+        let taskSection = sectionCard(title: "", views: [titleRow, taskListScroll], tone: 2)
 
-        for item in [fileSection, toolsSection, titleRow, taskListScroll] {
+        for item in [fileSection, toolsSection, taskSection] {
             item.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(item)
         }
         NSLayoutConstraint.activate([
-            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            fileSection.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            fileSection.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
 
-            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 14),
-            identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor),
+            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 8),
+            identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor, constant: -16),
 
-            titleRow.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
-            titleRow.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
-            titleRow.topAnchor.constraint(equalTo: toolsSection.bottomAnchor, constant: 16),
-
-            taskListScroll.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
-            taskListScroll.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
-            taskListScroll.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 8),
-            taskListScroll.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            taskSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            taskSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            taskSection.topAnchor.constraint(equalTo: toolsSection.bottomAnchor, constant: 8),
+            taskSection.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
             taskListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor)
+            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor),
+            titleRow.widthAnchor.constraint(equalTo: taskSection.widthAnchor, constant: -16),
+            taskListScroll.widthAnchor.constraint(equalTo: taskSection.widthAnchor, constant: -16)
         ])
         rebuildTaskList()
         return box
@@ -958,24 +949,33 @@ final class LegacyWindowController: NSViewController {
         card.layer?.cornerRadius = 5
         card.layer?.borderWidth = 1
 
-        let heading = label(title, size: 11, weight: .semibold)
         let content = NSStackView(views: views)
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 6
         content.translatesAutoresizingMaskIntoConstraints = false
 
-        card.addSubview(heading)
         card.addSubview(content)
-        NSLayoutConstraint.activate([
-            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
-            heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -8),
-            heading.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
-            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
-            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
-            content.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 6),
-            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
-        ])
+        if title.isEmpty {
+            NSLayoutConstraint.activate([
+                content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+                content.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+                content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            ])
+        } else {
+            let heading = label(title, size: 11, weight: .semibold)
+            card.addSubview(heading)
+            NSLayoutConstraint.activate([
+                heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -8),
+                heading.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
+                content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+                content.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 6),
+                content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            ])
+        }
         applySectionTone(card, tone: tone)
         return card
     }
@@ -1920,6 +1920,7 @@ final class LegacyCanvasView: NSView {
             if isInverted, invertedImage == nil {
                 invertedImage = Self.invertedPreview(from: image)
             }
+            displayInvertedPreviewImage = nil
             wheelInvertedPreviewImage = nil
             needsDisplay = true
         }
@@ -1946,6 +1947,8 @@ final class LegacyCanvasView: NSView {
 
     private var image: NSImage?
     private var invertedImage: NSImage?
+    private var displayPreviewImage: NSImage?
+    private var displayInvertedPreviewImage: NSImage?
     private var wheelPreviewImage: NSImage?
     private var wheelInvertedPreviewImage: NSImage?
     private var activeHandle: CropHandle?
@@ -1966,6 +1969,10 @@ final class LegacyCanvasView: NSView {
     private var lastPanDisplayTime: TimeInterval = 0
     private var lastCropDisplayTime: TimeInterval = 0
     private var pendingCropDirtyRect = CGRect.null
+    private let usesMojaveRenderingPath: Bool = {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return version.majorVersion == 10 && version.minorVersion <= 14
+    }()
 
     var currentTemplateRect: CGRect? {
         selectedIndex.flatMap { crops.indices.contains($0) ? crops[$0].rect : nil } ?? crops.first?.rect
@@ -1986,7 +1993,14 @@ final class LegacyCanvasView: NSView {
     func setImage(_ image: NSImage, crops: [LegacyCrop], rotationDegrees: Int, inverted: Bool) {
         self.image = image
         invertedImage = nil
-        wheelPreviewImage = Self.downsampledPreview(from: image, maxPixelSize: 1800)
+        displayPreviewImage = usesMojaveRenderingPath
+            ? Self.downsampledPreview(from: image, maxPixelSize: 2800)
+            : nil
+        displayInvertedPreviewImage = nil
+        wheelPreviewImage = Self.downsampledPreview(
+            from: image,
+            maxPixelSize: usesMojaveRenderingPath ? 1200 : 1800
+        )
         wheelInvertedPreviewImage = nil
         self.crops = crops
         previewRotationDegrees = normalizedRotation(rotationDegrees)
@@ -2005,7 +2019,14 @@ final class LegacyCanvasView: NSView {
         guard let image else { return }
         let displayImage = isInverted ? (invertedImage ?? image) : image
         let isInteracting = isWheelZooming || isPanning || activeIndex != nil
-        let drawnImage = isInteracting ? wheelPreview(for: displayImage, inverted: isInverted) : displayImage
+        let drawnImage: NSImage
+        if isInteracting {
+            drawnImage = wheelPreview(for: displayImage, inverted: isInverted)
+        } else if usesMojaveRenderingPath {
+            drawnImage = settledPreview(for: displayImage, inverted: isInverted)
+        } else {
+            drawnImage = displayImage
+        }
         let rect = imageContentRect()
         NSGraphicsContext.current?.imageInterpolation = isInteracting ? .low : .high
         NSGraphicsContext.current?.saveGraphicsState()
@@ -2031,11 +2052,30 @@ final class LegacyCanvasView: NSView {
         if !inverted, let wheelPreviewImage {
             return wheelPreviewImage
         }
-        let preview = Self.downsampledPreview(from: image, maxPixelSize: 1800) ?? image
+        let preview = Self.downsampledPreview(
+            from: image,
+            maxPixelSize: usesMojaveRenderingPath ? 1200 : 1800
+        ) ?? image
         if inverted {
             wheelInvertedPreviewImage = preview
         } else {
             wheelPreviewImage = preview
+        }
+        return preview
+    }
+
+    private func settledPreview(for image: NSImage, inverted: Bool) -> NSImage {
+        if inverted, let displayInvertedPreviewImage {
+            return displayInvertedPreviewImage
+        }
+        if !inverted, let displayPreviewImage {
+            return displayPreviewImage
+        }
+        let preview = Self.downsampledPreview(from: image, maxPixelSize: 2800) ?? image
+        if inverted {
+            displayInvertedPreviewImage = preview
+        } else {
+            displayPreviewImage = preview
         }
         return preview
     }
@@ -2076,7 +2116,8 @@ final class LegacyCanvasView: NSView {
                 x: startPanOffset.x + point.x - startPoint.x,
                 y: startPanOffset.y + point.y - startPoint.y
             )
-            if event.timestamp - lastPanDisplayTime >= 1.0 / 60.0 {
+            let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+            if event.timestamp - lastPanDisplayTime >= frameInterval {
                 lastPanDisplayTime = event.timestamp
                 needsDisplay = true
             }
@@ -2105,7 +2146,8 @@ final class LegacyCanvasView: NSView {
         let newDirty = cropDirtyRect(crops[activeIndex], imageRect: imgRect).union(newLens)
         let dirty = oldDirty.union(newDirty).insetBy(dx: -8, dy: -8)
         pendingCropDirtyRect = pendingCropDirtyRect.isNull ? dirty : pendingCropDirtyRect.union(dirty)
-        if event.timestamp - lastCropDisplayTime >= 1.0 / 60.0 {
+        let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+        if event.timestamp - lastCropDisplayTime >= frameInterval {
             lastCropDisplayTime = event.timestamp
             setNeedsDisplay(pendingCropDirtyRect)
             pendingCropDirtyRect = .null
@@ -2182,11 +2224,12 @@ final class LegacyCanvasView: NSView {
         let delta = event.scrollingDeltaY == 0 ? event.scrollingDeltaX : event.scrollingDeltaY
         guard delta != 0 else { return }
         isWheelZooming = true
-        let factor = pow(CGFloat(1.0018), -delta)
+        let factor = pow(CGFloat(1.0018), delta)
         suppressZoomRedraw = true
         zoom = min(8, max(0.25, zoom * factor))
         suppressZoomRedraw = false
-        if event.timestamp - lastWheelZoomDisplayTime >= 1.0 / 60.0 {
+        let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+        if event.timestamp - lastWheelZoomDisplayTime >= frameInterval {
             lastWheelZoomDisplayTime = event.timestamp
             needsDisplay = true
         }
