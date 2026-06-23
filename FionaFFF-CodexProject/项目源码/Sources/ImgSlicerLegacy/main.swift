@@ -16,6 +16,9 @@ struct LegacyCrop: Equatable {
 struct LegacyImageAdjustments: Equatable {
     var levelsEnabled = false
     var curvesEnabled = false
+    var redGain: Double = 1
+    var greenGain: Double = 1
+    var blueGain: Double = 1
     var inputBlack: Double = 0
     var inputWhite: Double = 1
     var gamma: Double = 1
@@ -25,7 +28,12 @@ struct LegacyImageAdjustments: Equatable {
     var curveMidtones: Double = 0
     var curveHighlights: Double = 0
 
-    var isActive: Bool { levelsEnabled || curvesEnabled }
+    var isActive: Bool {
+        levelsEnabled || curvesEnabled ||
+            abs(redGain - 1) > 0.0001 ||
+            abs(greenGain - 1) > 0.0001 ||
+            abs(blueGain - 1) > 0.0001
+    }
 }
 
 struct LegacyPhoto {
@@ -692,6 +700,27 @@ final class LegacyWindowController: NSViewController {
         return image
     }
 
+    private func autoToneIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+        let bars: [(CGFloat, CGFloat)] = [(4, 5), (8, 9), (12, 13), (16, 8)]
+        for (x, height) in bars {
+            NSBezierPath(rect: NSRect(x: x, y: 4, width: 2.2, height: height)).fill()
+        }
+        let sparkle = NSBezierPath()
+        sparkle.lineWidth = 1.4
+        sparkle.move(to: NSPoint(x: 17, y: 14))
+        sparkle.line(to: NSPoint(x: 17, y: 21))
+        sparkle.move(to: NSPoint(x: 13.5, y: 17.5))
+        sparkle.line(to: NSPoint(x: 20.5, y: 17.5))
+        sparkle.stroke()
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
     private func iconButton(_ iconName: String, title: String = "", action: Selector, help: String) -> NSButton {
         imageButton(iconImage(iconName), title: title, action: action, help: help)
     }
@@ -793,6 +822,7 @@ final class LegacyWindowController: NSViewController {
         resetZoomButton.toolTip = "恢复 100% 预览"
         let zoomInButton = iconButton("NSEnterFullScreenTemplate", action: #selector(zoomIn), help: "放大预览")
         let invertButton = imageButton(invertIcon(), action: #selector(toggleInvertImage), help: "一键反相当前图片，导出保持反相效果")
+        let autoToneButton = imageButton(autoToneIcon(), action: #selector(autoToneAndColor), help: "一键自动色调、自动对比度和自动颜色，建议在反相后使用")
         let loupeButton = imageButton(loupeIcon(), action: #selector(toggleMagnifier), help: "开启或关闭拖动红框时的放大镜，快捷键 D")
 
         let rotateActions = NSStackView(views: [
@@ -808,7 +838,7 @@ final class LegacyWindowController: NSViewController {
         zoomActions.orientation = .horizontal
         zoomActions.alignment = .centerY
         zoomActions.spacing = 6
-        let viewActions = NSStackView(views: [applyButton, loupeButton, invertButton])
+        let viewActions = NSStackView(views: [applyButton, loupeButton, invertButton, autoToneButton])
         viewActions.orientation = .horizontal
         viewActions.alignment = .centerY
         viewActions.spacing = 6
@@ -1270,7 +1300,13 @@ final class LegacyWindowController: NSViewController {
             statusLabel.stringValue = "无法打开图片。"
             return
         }
-        canvas.setImage(image, crops: photo.crops, rotationDegrees: photo.previewRotationDegrees, inverted: photo.isInverted)
+        canvas.setImage(
+            image,
+            crops: photo.crops,
+            rotationDegrees: photo.previewRotationDegrees,
+            inverted: photo.isInverted,
+            adjustments: photo.adjustments
+        )
         fileNameLabel.stringValue = "\(task.name)：\(selectedPhotoIndex + 1) / \(task.photos.count)  \(photo.name)"
         outputLabel.stringValue = "输出：\(exportDirectory?.path ?? photo.url.deletingLastPathComponent().path)"
         photoPopup.selectItem(at: selectedPhotoIndex)
@@ -1373,6 +1409,7 @@ final class LegacyWindowController: NSViewController {
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = canvas.crops
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].previewRotationDegrees = canvas.previewRotationDegrees
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].isInverted = canvas.isInverted
+        tasks[selectedTaskIndex].photos[selectedPhotoIndex].adjustments = canvas.adjustments
         if let selected = canvas.currentTemplateRect {
             templateRect = selected
             if updateTemplateAspect {
@@ -1821,6 +1858,20 @@ final class LegacyWindowController: NSViewController {
         statusLabel.stringValue = canvas.isInverted ? "已反相当前图片，导出会保持反相效果。" : "已取消当前图片反相。"
     }
 
+    @objc private func autoToneAndColor() {
+        guard tasks.indices.contains(selectedTaskIndex),
+              tasks[selectedTaskIndex].photos.indices.contains(selectedPhotoIndex) else { return }
+        guard let adjustments = canvas.makeAutomaticAdjustments() else {
+            statusLabel.stringValue = "自动校色失败：无法读取当前图片像素。"
+            return
+        }
+        canvas.adjustments = adjustments
+        saveCurrentCrops(updateTemplateAspect: false)
+        statusLabel.stringValue = canvas.isInverted
+            ? "已在反相图像上完成自动色调、自动对比度和自动颜色。"
+            : "已完成自动色调、自动对比度和自动颜色；底片建议先反相再使用。"
+    }
+
     @objc private func toggleMagnifier() {
         canvas.isMagnifierEnabled.toggle()
         statusLabel.stringValue = canvas.isMagnifierEnabled ? "已开启拖动放大镜。" : "已关闭拖动放大镜。"
@@ -1978,6 +2029,20 @@ final class LegacyCanvasView: NSView {
             }
             displayInvertedPreviewImage = nil
             wheelInvertedPreviewImage = nil
+            adjustedImage = nil
+            adjustedInvertedImage = nil
+            needsDisplay = true
+        }
+    }
+    var adjustments = LegacyImageAdjustments() {
+        didSet {
+            adjustedImage = nil
+            adjustedInvertedImage = nil
+            displayPreviewImage = nil
+            displayInvertedPreviewImage = nil
+            wheelPreviewImage = nil
+            wheelInvertedPreviewImage = nil
+            interactionSnapshot = nil
             needsDisplay = true
         }
     }
@@ -2003,6 +2068,8 @@ final class LegacyCanvasView: NSView {
 
     private var image: NSImage?
     private var invertedImage: NSImage?
+    private var adjustedImage: NSImage?
+    private var adjustedInvertedImage: NSImage?
     private var displayPreviewImage: NSImage?
     private var displayInvertedPreviewImage: NSImage?
     private var wheelPreviewImage: NSImage?
@@ -2049,17 +2116,21 @@ final class LegacyCanvasView: NSView {
         registerForDraggedTypes([.fileURL])
     }
 
-    func setImage(_ image: NSImage, crops: [LegacyCrop], rotationDegrees: Int, inverted: Bool) {
+    func setImage(
+        _ image: NSImage,
+        crops: [LegacyCrop],
+        rotationDegrees: Int,
+        inverted: Bool,
+        adjustments: LegacyImageAdjustments = LegacyImageAdjustments()
+    ) {
         self.image = image
         invertedImage = nil
-        displayPreviewImage = usesMojaveRenderingPath
-            ? Self.downsampledPreview(from: image, maxPixelSize: 2800)
-            : nil
+        adjustedImage = nil
+        adjustedInvertedImage = nil
+        self.adjustments = adjustments
+        displayPreviewImage = nil
         displayInvertedPreviewImage = nil
-        wheelPreviewImage = Self.downsampledPreview(
-            from: image,
-            maxPixelSize: usesMojaveRenderingPath ? 1200 : 1800
-        )
+        wheelPreviewImage = nil
         wheelInvertedPreviewImage = nil
         self.crops = crops
         previewRotationDegrees = normalizedRotation(rotationDegrees)
@@ -2070,6 +2141,11 @@ final class LegacyCanvasView: NSView {
         lastMagnifierFrame = .null
         pendingCropDirtyRect = .null
         needsDisplay = true
+    }
+
+    func makeAutomaticAdjustments() -> LegacyImageAdjustments? {
+        guard let image else { return nil }
+        return LegacyAutoColorAnalyzer.adjustments(for: image, inverted: isInverted)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -2098,7 +2174,7 @@ final class LegacyCanvasView: NSView {
             return
         }
         guard let image else { return }
-        let displayImage = isInverted ? (invertedImage ?? image) : image
+        let displayImage = processedImage(from: image, inverted: isInverted)
         let usesFastInteractionPreview = isWheelZooming || isPanning
         let drawnImage: NSImage
         if usesFastInteractionPreview {
@@ -2124,6 +2200,24 @@ final class LegacyCanvasView: NSView {
         if isMagnifierEnabled, let magnifierPoint, let activeIndex, crops.indices.contains(activeIndex) {
             drawMagnifier(sourcePoint: magnifierPoint, imageRect: rect, displayImage: displayImage, activeCrop: crops[activeIndex])
         }
+    }
+
+    private func processedImage(from image: NSImage, inverted: Bool) -> NSImage {
+        if inverted, let adjustedInvertedImage { return adjustedInvertedImage }
+        if !inverted, let adjustedImage { return adjustedImage }
+        let base = inverted ? (invertedImage ?? image) : image
+        guard adjustments.isActive,
+              let cgImage = base.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let output = LegacyToneMapper.adjustedImage(cgImage, adjustments: adjustments) else {
+            return base
+        }
+        let result = NSImage(cgImage: output, size: base.size)
+        if inverted {
+            adjustedInvertedImage = result
+        } else {
+            adjustedImage = result
+        }
+        return result
     }
 
     private func wheelPreview(for image: NSImage, inverted: Bool) -> NSImage {
@@ -2695,6 +2789,113 @@ enum CropHandle {
     }
 }
 
+enum LegacyAutoColorAnalyzer {
+    static func adjustments(for image: NSImage, inverted: Bool) -> LegacyImageAdjustments? {
+        guard let preview = downsample(image, maxPixelSize: 900),
+              let cgImage = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else { return nil }
+
+        var histogram = [Int](repeating: 0, count: 256)
+        var redTotal = 0.0
+        var greenTotal = 0.0
+        var blueTotal = 0.0
+        var neutralCount = 0.0
+        let insetX = max(1, width / 50)
+        let insetY = max(1, height / 50)
+        for y in stride(from: insetY, to: max(insetY + 1, height - insetY), by: 2) {
+            for x in stride(from: insetX, to: max(insetX + 1, width - insetX), by: 2) {
+                let offset = y * bytesPerRow + x * 4
+                let red = inverted ? 255 - Int(pixels[offset]) : Int(pixels[offset])
+                let green = inverted ? 255 - Int(pixels[offset + 1]) : Int(pixels[offset + 1])
+                let blue = inverted ? 255 - Int(pixels[offset + 2]) : Int(pixels[offset + 2])
+                let luminance = min(255, max(0, Int(0.2126 * Double(red) + 0.7152 * Double(green) + 0.0722 * Double(blue))))
+                histogram[luminance] += 1
+                if luminance > 18 && luminance < 240 {
+                    redTotal += Double(red)
+                    greenTotal += Double(green)
+                    blueTotal += Double(blue)
+                    neutralCount += 1
+                }
+            }
+        }
+        let sampleCount = histogram.reduce(0, +)
+        guard sampleCount > 100, neutralCount > 20 else { return nil }
+        let low = percentile(histogram, fraction: 0.005)
+        let high = percentile(histogram, fraction: 0.995)
+        guard high > low + 8 else { return nil }
+        let median = percentile(histogram, fraction: 0.5)
+        let normalizedMedian = min(0.9, max(0.1, Double(median - low) / Double(high - low)))
+        let gamma = min(2.2, max(0.55, log(normalizedMedian) / log(0.5)))
+
+        let redMean = redTotal / neutralCount
+        let greenMean = greenTotal / neutralCount
+        let blueMean = blueTotal / neutralCount
+        let target = (redMean + greenMean + blueMean) / 3
+        var result = LegacyImageAdjustments()
+        result.levelsEnabled = true
+        result.inputBlack = Double(low) / 255
+        result.inputWhite = Double(high) / 255
+        result.gamma = gamma
+        result.redGain = min(1.35, max(0.74, target / max(1, redMean)))
+        result.greenGain = min(1.35, max(0.74, target / max(1, greenMean)))
+        result.blueGain = min(1.35, max(0.74, target / max(1, blueMean)))
+        return result
+    }
+
+    private static func percentile(_ histogram: [Int], fraction: Double) -> Int {
+        let target = Int(Double(histogram.reduce(0, +)) * fraction)
+        var running = 0
+        for (index, count) in histogram.enumerated() {
+            running += count
+            if running >= target { return index }
+        }
+        return histogram.count - 1
+    }
+
+    private static func downsample(_ image: NSImage, maxPixelSize: Int) -> NSImage? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let longest = max(cgImage.width, cgImage.height)
+        guard longest > maxPixelSize else { return image }
+        let scale = Double(maxPixelSize) / Double(longest)
+        let width = max(1, Int(Double(cgImage.width) * scale))
+        let height = max(1, Int(Double(cgImage.height) * scale))
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let output = context.makeImage() else { return nil }
+        return NSImage(cgImage: output, size: NSSize(width: width, height: height))
+    }
+}
+
 enum LegacyToneMapper {
     static func adjustedImage(_ image: CGImage, adjustments: LegacyImageAdjustments) -> CGImage? {
         guard adjustments.isActive else { return image }
@@ -2723,11 +2924,13 @@ enum LegacyToneMapper {
             return true
         }
         guard drew else { return nil }
-        let lut = makeLUT8(adjustments: adjustments)
+        let redLUT = makeLUT8(adjustments: adjustments, gain: adjustments.redGain)
+        let greenLUT = makeLUT8(adjustments: adjustments, gain: adjustments.greenGain)
+        let blueLUT = makeLUT8(adjustments: adjustments, gain: adjustments.blueGain)
         for index in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
-            pixels[index] = lut[Int(pixels[index])]
-            pixels[index + 1] = lut[Int(pixels[index + 1])]
-            pixels[index + 2] = lut[Int(pixels[index + 2])]
+            pixels[index] = redLUT[Int(pixels[index])]
+            pixels[index + 1] = greenLUT[Int(pixels[index + 1])]
+            pixels[index + 2] = blueLUT[Int(pixels[index + 2])]
         }
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo), provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
@@ -2736,23 +2939,27 @@ enum LegacyToneMapper {
     private static func adjusted16BitRGBImage(_ image: CGImage, adjustments: LegacyImageAdjustments) -> CGImage? {
         guard var pixels = compact16BitRGBPixels(from: image) else { return nil }
         let littleEndian = image.bitmapInfo.rawValue & CGBitmapInfo.byteOrder16Little.rawValue != 0
-        let lut = makeLUT16(adjustments: adjustments)
+        let luts = [
+            makeLUT16(adjustments: adjustments, gain: adjustments.redGain),
+            makeLUT16(adjustments: adjustments, gain: adjustments.greenGain),
+            makeLUT16(adjustments: adjustments, gain: adjustments.blueGain)
+        ]
         for offset in stride(from: 0, to: pixels.count, by: 2) {
             let value = Int(readUInt16(pixels, offset: offset, littleEndian: littleEndian))
-            writeUInt16(lut[value], pixels: &pixels, offset: offset, littleEndian: littleEndian)
+            writeUInt16(luts[(offset / 2) % 3][value], pixels: &pixels, offset: offset, littleEndian: littleEndian)
         }
         return make16BitRGBImage(width: image.width, height: image.height, pixels: pixels, colorSpace: image.colorSpace, bitmapInfo: image.bitmapInfo)
     }
 
-    private static func makeLUT8(adjustments: LegacyImageAdjustments) -> [UInt8] {
+    private static func makeLUT8(adjustments: LegacyImageAdjustments, gain: Double) -> [UInt8] {
         (0...255).map { value in
-            UInt8(clamping: Int(round(mappedValue(Double(value) / 255, adjustments: adjustments) * 255)))
+            UInt8(clamping: Int(round(mappedValue(Double(value) / 255 * gain, adjustments: adjustments) * 255)))
         }
     }
 
-    private static func makeLUT16(adjustments: LegacyImageAdjustments) -> [UInt16] {
+    private static func makeLUT16(adjustments: LegacyImageAdjustments, gain: Double) -> [UInt16] {
         (0...65535).map { value in
-            UInt16(clamping: Int(round(mappedValue(Double(value) / 65535, adjustments: adjustments) * 65535)))
+            UInt16(clamping: Int(round(mappedValue(Double(value) / 65535 * gain, adjustments: adjustments) * 65535)))
         }
     }
 
