@@ -2606,6 +2606,11 @@ enum LegacyFrameDetector {
 
         var rects: [CGRect] = []
         for row in rows {
+            let separatedFrames = horizontalFrames(in: row, luminances: luminances, width: width, height: height)
+            if separatedFrames.count == 6 {
+                rects.append(contentsOf: separatedFrames)
+                continue
+            }
             let yRange = horizontalFrameYRange(row, luminances: luminances, width: width, height: height)
             let xRange = horizontalFrameContentXRange(yStart: yRange.start, yEnd: yRange.end, luminances: luminances, width: width)
                 ?? horizontalFilmXRange(yStart: yRange.start, yEnd: yRange.end, luminances: luminances, width: width)
@@ -3715,6 +3720,18 @@ enum LegacyFrameDetector {
 
     static func detectFrameCenters(url: URL) -> [CGPoint] {
         guard let gray = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096) else { return [] }
+        let luminances = gray.bytes.map { Double($0) / 255.0 }
+        let separatedRects = detectHorizontalNegativeFilmRects(
+            luminances: luminances,
+            width: gray.width,
+            height: gray.height
+        )
+        if separatedRects.count == 12,
+           hasCompleteTwoRowSixCoverage(separatedRects) {
+            return separatedRects
+                .sortedForReadingOrder()
+                .map { CGPoint(x: $0.midX, y: $0.midY) }
+        }
         let rows = contentSegments(axisCount: gray.height) { y in
             var count = 0
             let row = y * gray.width
