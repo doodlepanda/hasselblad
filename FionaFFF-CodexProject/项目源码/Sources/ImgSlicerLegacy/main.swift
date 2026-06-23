@@ -2438,12 +2438,17 @@ enum LegacyFrameDetector {
                 width: gray.width,
                 height: gray.height
             ) {
-                candidates.append(LegacyDetectionCandidate(
+                let displayRect = rasterRectToDisplayRect(singleRect)
+                let candidate = LegacyDetectionCandidate(
                     title: "单张完整片框",
                     detail: "单幅扫描，按底片外边界识别一个画面",
-                    rects: [singleRect],
-                    score: scoreCandidate([singleRect], expectedCount: 1) + 0.38
-                ))
+                    rects: [displayRect],
+                    score: min(1, scoreCandidate([singleRect], expectedCount: 1) + 0.70)
+                )
+                return LegacyDetectionResult(
+                    crops: sameSizeTemplateCrops(from: [displayRect], template: template),
+                    candidates: [candidate]
+                )
             }
             let strictRects = detectTwoRowSixFrameRects(luminances: luminances, width: gray.width, height: gray.height)
             if strictRects.count == 12 {
@@ -2614,12 +2619,13 @@ enum LegacyFrameDetector {
             }
             return Double(nonWhite) / Double(width)
         }
-        guard let row = thresholdSegments(
-            values: movingAverage(rowOccupancy, window: max(3, height / 500)),
-            threshold: 0.14,
-            minimumSize: max(30, height / 3),
-            lessThan: false
-        ).max(by: { $0.size < $1.size }) else { return nil }
+        let activeRows = movingAverage(rowOccupancy, window: max(3, height / 500))
+            .enumerated()
+            .compactMap { $0.element >= 0.30 ? $0.offset : nil }
+        guard let rowStart = activeRows.first,
+              let rowEndValue = activeRows.last,
+              rowEndValue - rowStart >= Int(Double(height) * 0.60) else { return nil }
+        let row = IntSegment(start: rowStart, end: min(height, rowEndValue + 1))
 
         let columnOccupancy = (0..<width).map { x -> Double in
             var nonWhite = 0
@@ -2628,12 +2634,18 @@ enum LegacyFrameDetector {
             }
             return Double(nonWhite) / Double(max(1, row.size))
         }
-        guard let column = thresholdSegments(
-            values: movingAverage(columnOccupancy, window: max(3, width / 500)),
-            threshold: 0.14,
-            minimumSize: max(30, width / 3),
-            lessThan: false
-        ).max(by: { $0.size < $1.size }) else { return nil }
+        let activeColumns = movingAverage(columnOccupancy, window: max(3, width / 500))
+            .enumerated()
+            .compactMap { $0.element >= 0.30 ? $0.offset : nil }
+        guard let columnStart = activeColumns.first,
+              let columnEndValue = activeColumns.last,
+              columnEndValue - columnStart >= Int(Double(width) * 0.60) else { return nil }
+        let column = IntSegment(start: columnStart, end: min(width, columnEndValue + 1))
+
+        let borderRows = rowOccupancy[row.start..<row.end].filter { $0 >= 0.72 }.count
+        let borderColumns = columnOccupancy[column.start..<column.end].filter { $0 >= 0.72 }.count
+        guard borderRows >= max(2, height / 900),
+              borderColumns >= max(2, width / 900) else { return nil }
 
         let outer = CGRect(
             x: Double(column.start) / Double(width),
