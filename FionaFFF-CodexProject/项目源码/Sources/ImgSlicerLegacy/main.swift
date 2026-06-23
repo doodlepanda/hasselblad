@@ -1161,7 +1161,7 @@ final class LegacyWindowController: NSViewController {
         updateStableButtonColors(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
-        updateExportControlTextColors(textColor)
+        updateControlTextColors(in: view, textColor: textColor)
     }
 
     private func updateSectionTones(in root: NSView) {
@@ -1194,28 +1194,48 @@ final class LegacyWindowController: NSViewController {
         }
     }
 
-    private func updateExportControlTextColors(_ color: NSColor) {
-        let checkboxFont = fffParsingCheckbox.font ?? NSFont.systemFont(ofSize: 12)
-        fffParsingCheckbox.contentTintColor = color
-        fffParsingCheckbox.attributedTitle = NSAttributedString(
-            string: fffParsingCheckbox.title,
-            attributes: [.foregroundColor: color, .font: checkboxFont]
-        )
+    private func updateControlTextColors(in root: NSView, textColor: NSColor) {
+        for subview in root.subviews {
+            if let popup = subview as? NSPopUpButton {
+                popup.contentTintColor = textColor
+                let font = popup.font ?? NSFont.systemFont(ofSize: 12)
+                for item in popup.itemArray {
+                    item.attributedTitle = NSAttributedString(
+                        string: item.title,
+                        attributes: [.foregroundColor: textColor, .font: font]
+                    )
+                }
+                if let title = popup.selectedItem?.title {
+                    popup.attributedTitle = NSAttributedString(
+                        string: title,
+                        attributes: [.foregroundColor: textColor, .font: font]
+                    )
+                }
+            } else if let button = subview as? NSButton,
+                      button.identifier?.rawValue.hasPrefix("stableButton.") != true,
+                      !button.title.isEmpty {
+                button.contentTintColor = textColor
+                button.attributedTitle = NSAttributedString(
+                    string: button.title,
+                    attributes: [
+                        .foregroundColor: textColor,
+                        .font: button.font ?? NSFont.systemFont(ofSize: 12)
+                    ]
+                )
+            }
+            updateControlTextColors(in: subview, textColor: textColor)
+        }
+    }
 
-        formatPopup.contentTintColor = color
-        let popupFont = formatPopup.font ?? NSFont.systemFont(ofSize: 12)
-        for item in formatPopup.itemArray {
-            item.attributedTitle = NSAttributedString(
-                string: item.title,
-                attributes: [.foregroundColor: color, .font: popupFont]
-            )
-        }
-        if let selectedTitle = formatPopup.selectedItem?.title {
-            formatPopup.attributedTitle = NSAttributedString(
-                string: selectedTitle,
-                attributes: [.foregroundColor: color, .font: popupFont]
-            )
-        }
+    private func refreshThemeText(in root: NSView) {
+        let textColor = usesLightTheme
+            ? NSColor(calibratedWhite: 0.12, alpha: 1)
+            : NSColor(calibratedWhite: 0.88, alpha: 1)
+        let mutedColor = usesLightTheme
+            ? NSColor(calibratedWhite: 0.36, alpha: 1)
+            : NSColor(calibratedWhite: 0.62, alpha: 1)
+        setTextColors(in: root, textColor: textColor, mutedColor: mutedColor)
+        updateControlTextColors(in: root, textColor: textColor)
     }
 
     private func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = NSColor(calibratedWhite: 0.88, alpha: 1)) -> NSTextField {
@@ -1359,6 +1379,7 @@ final class LegacyWindowController: NSViewController {
             empty.widthAnchor.constraint(equalTo: algorithmListStack.widthAnchor).isActive = true
             empty.heightAnchor.constraint(equalToConstant: 46).isActive = true
             detectionReportLabel.stringValue = "算法候选：等待识别"
+            refreshThemeText(in: algorithmListStack)
             return
         }
         let key = photoKey(photo.url)
@@ -1382,6 +1403,7 @@ final class LegacyWindowController: NSViewController {
             button.heightAnchor.constraint(equalToConstant: 42).isActive = true
         }
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: [], candidates: candidates).reportText
+        refreshThemeText(in: algorithmListStack)
     }
 
     @objc private func algorithmCandidateSelected(_ sender: NSButton) {
@@ -1500,6 +1522,7 @@ final class LegacyWindowController: NSViewController {
             taskListStack.addArrangedSubview(empty)
             empty.widthAnchor.constraint(equalTo: taskListStack.widthAnchor).isActive = true
             empty.heightAnchor.constraint(equalToConstant: 70).isActive = true
+            refreshThemeText(in: taskListStack)
             return
         }
         for (index, task) in tasks.enumerated() {
@@ -1562,6 +1585,7 @@ final class LegacyWindowController: NSViewController {
             row.addSubview(stop, positioned: .above, relativeTo: select)
             row.addSubview(remove, positioned: .above, relativeTo: select)
         }
+        refreshThemeText(in: taskListStack)
     }
 
     private func updateTaskCountLabel(in root: NSView) {
@@ -1645,6 +1669,7 @@ final class LegacyWindowController: NSViewController {
             tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
             filmstripStack.addArrangedSubview(tile)
         }
+        refreshThemeText(in: filmstripStack)
         updateFilmstripSelection()
     }
 
