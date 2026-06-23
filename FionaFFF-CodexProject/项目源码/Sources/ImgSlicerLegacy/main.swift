@@ -326,7 +326,6 @@ final class LegacyWindowController: NSViewController {
     private let outputLabel = NSTextField(labelWithString: "默认导出到原文件夹")
     private let cropCountLabel = NSTextField(labelWithString: "红框 0 个")
     private let detectionReportLabel = NSTextField(labelWithString: "算法候选：等待识别")
-    private let algorithmListScroll = NSScrollView()
     private let algorithmListStack = NSStackView()
     private let taskListScroll = NSScrollView()
     private let taskListStack = LegacyFlippedStackView()
@@ -866,12 +865,8 @@ final class LegacyWindowController: NSViewController {
         algorithmListStack.alignment = .leading
         algorithmListStack.spacing = 5
         algorithmListStack.translatesAutoresizingMaskIntoConstraints = false
-        algorithmListScroll.documentView = algorithmListStack
-        algorithmListScroll.hasVerticalScroller = true
-        algorithmListScroll.hasHorizontalScroller = false
-        algorithmListScroll.autohidesScrollers = true
-        algorithmListScroll.drawsBackground = false
-        algorithmListScroll.translatesAutoresizingMaskIntoConstraints = false
+        algorithmListStack.setHuggingPriority(.required, for: .vertical)
+        algorithmListStack.setContentCompressionResistancePriority(.required, for: .vertical)
         fffParsingCheckbox.font = NSFont.systemFont(ofSize: 12)
         fffParsingCheckbox.contentTintColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         dustRemovalCheckbox.font = NSFont.systemFont(ofSize: 12)
@@ -893,23 +888,42 @@ final class LegacyWindowController: NSViewController {
         let shortcutLabel = label("快捷键：方向键移动全部红框 · A 新增 · S/Delete 删除 · D 放大镜 · 滚轮缩放", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
         shortcutLabel.maximumNumberOfLines = 4
         shortcutLabel.lineBreakMode = .byWordWrapping
+
+        let cropSection = sectionCard(
+            title: "裁切框",
+            views: [toolRow],
+            tone: 0
+        )
+        let nudgeSection = sectionCard(
+            title: "统一微调",
+            views: [nudgeRow],
+            tone: 1
+        )
+        let algorithmSection = sectionCard(
+            title: "算法结果",
+            views: [algorithmListStack],
+            tone: 2
+        )
+        let exportSection = sectionCard(
+            title: "导出设置",
+            views: [
+                fffParsingCheckbox,
+                formatPopup,
+                dustRow,
+                dustStrengthSlider,
+                exportRow,
+                outputLabel
+            ],
+            tone: 1
+        )
+
         let stack = NSStackView(views: [
             title,
             separator(),
-            label("裁切框", size: 12, weight: .semibold),
-            toolRow,
-            label("统一微调", size: 12, weight: .semibold),
-            nudgeRow,
-            label("算法结果", size: 12, weight: .semibold),
-            algorithmListScroll,
-            label("导出格式", size: 12, weight: .semibold),
-            fffParsingCheckbox,
-            formatPopup,
-            dustRow,
-            dustStrengthSlider,
-            exportRow,
-            outputLabel,
-            separator(),
+            cropSection,
+            nudgeSection,
+            algorithmSection,
+            exportSection,
             shortcutLabel,
         ])
         stack.orientation = .vertical
@@ -921,15 +935,67 @@ final class LegacyWindowController: NSViewController {
             stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
             stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
             stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
-            algorithmListScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            algorithmListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 145),
-            algorithmListStack.widthAnchor.constraint(equalTo: algorithmListScroll.contentView.widthAnchor),
-            formatPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            dustStrengthSlider.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            exportRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: box.bottomAnchor, constant: -8),
+            cropSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            nudgeSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            exportSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmListStack.widthAnchor.constraint(equalTo: algorithmSection.widthAnchor, constant: -16),
+            algorithmListStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 183),
+            formatPopup.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
+            dustStrengthSlider.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
+            exportRow.widthAnchor.constraint(lessThanOrEqualTo: exportSection.widthAnchor, constant: -16),
             shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         return box
+    }
+
+    private func sectionCard(title: String, views: [NSView], tone: Int) -> NSView {
+        let card = NSView()
+        card.identifier = NSUserInterfaceItemIdentifier("sectionTone\(tone)")
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 5
+        card.layer?.borderWidth = 1
+
+        let heading = label(title, size: 11, weight: .semibold)
+        let content = NSStackView(views: views)
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(heading)
+        card.addSubview(content)
+        NSLayoutConstraint.activate([
+            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -8),
+            heading.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+            content.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 6),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+        ])
+        applySectionTone(card, tone: tone)
+        return card
+    }
+
+    private func applySectionTone(_ view: NSView, tone: Int) {
+        let darkColors = [
+            NSColor(calibratedWhite: 0.115, alpha: 0.72),
+            NSColor(calibratedWhite: 0.185, alpha: 0.72),
+            NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.21, alpha: 0.82)
+        ]
+        let lightColors = [
+            NSColor(calibratedWhite: 0.91, alpha: 1),
+            NSColor(calibratedWhite: 0.965, alpha: 1),
+            NSColor(calibratedRed: 0.88, green: 0.92, blue: 0.97, alpha: 1)
+        ]
+        let colors = usesLightTheme ? lightColors : darkColors
+        view.layer?.backgroundColor = colors[min(max(tone, 0), colors.count - 1)].cgColor
+        view.layer?.borderColor = (usesLightTheme
+            ? NSColor.black.withAlphaComponent(0.12)
+            : NSColor.white.withAlphaComponent(0.09)).cgColor
     }
 
     private func makeBottomPanel() -> NSView {
@@ -1015,8 +1081,20 @@ final class LegacyWindowController: NSViewController {
             panel.layer?.backgroundColor = panelColor.cgColor
             panel.layer?.borderColor = borderColor.cgColor
         }
+        updateSectionTones(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
+    }
+
+    private func updateSectionTones(in root: NSView) {
+        for subview in root.subviews {
+            if let raw = subview.identifier?.rawValue,
+               raw.hasPrefix("sectionTone"),
+               let tone = Int(raw.dropFirst("sectionTone".count)) {
+                applySectionTone(subview, tone: tone)
+            }
+            updateSectionTones(in: subview)
+        }
     }
 
     private func setTextColors(in root: NSView, textColor: NSColor, mutedColor: NSColor) {
