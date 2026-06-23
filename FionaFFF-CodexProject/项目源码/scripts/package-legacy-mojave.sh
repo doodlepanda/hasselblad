@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
 APP_VERSION="0.35.2"
-APP_BUILD="68"
+APP_BUILD="73"
 RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -115,9 +115,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-68</string>
+  <string>0.35.2-legacy-73</string>
   <key>CFBundleVersion</key>
-  <string>68</string>
+  <string>73</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>
@@ -161,6 +161,16 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 - DMG：$RELEASE_NAME.dmg
 
 本次更新：
+- 底部文件栏取消图片缩略图，只显示系统文件图标、文件名和删除按钮，不再为每个文件解码预览图。
+- 删除非当前文件时不再重新加载当前大图，减少删除和列表刷新的等待；底栏高度同步缩小，扩大中央画布。
+- 左侧任务列表固定按导入顺序从上到下排列。
+- 左侧工具栏按文件操作、自动识别、旋转、缩放、应用与查看工具重新排列，移除当前图片下拉菜单，任务列表使用剩余纵向空间。
+- 右侧第一排只保留新增和删除当前选框，第二排统一微调；算法候选改为直接可点击列表，显示算法名称、识别张数和可信度。
+- 键盘方向键绑定为移动当前图片全部红框，支持按住连续微调。
+- FFF/3F 解析默认关闭，需要时可在右侧手动开启。
+- 重做左侧任务区：取消任务下拉菜单，改为按文件夹名称显示的竖向任务列表；每个任务可直接选择、单独终止或删除。
+- 左侧工具重新分区为任务列表、文件操作、当前图片与画面工具，减少按钮混杂并扩大任务列表可视面积。
+- 优化画布交互性能：拖动画布、拖动红框和滚轮缩放期间统一使用约 1800px 的轻量预览缓存，并将重绘限制在约 60fps，操作结束后恢复高清显示。
 - JPG 导出质量提升至 ImageIO 最高等级 1.0，显著增大文件体积并减少胶片颗粒、天空、树叶和建筑细节的压缩损失；完全无损仍建议使用 TIF 16-bit。
 - 2x6 固定胶片识别后，全部 12 个红框统一沿用第一个手工调整红框的宽高，算法只负责确定各画面中心位置。
 - 改进除尘算法：支持草地等有色背景上的半透明白色小尘点，并通过小面积和纹理保护减少误伤树叶与画面细节。
