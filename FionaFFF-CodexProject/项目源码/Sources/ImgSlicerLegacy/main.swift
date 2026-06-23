@@ -715,30 +715,6 @@ final class LegacyWindowController: NSViewController {
         return image
     }
 
-    private func trashAllIcon() -> NSImage {
-        let image = NSImage(size: NSSize(width: 22, height: 22))
-        image.lockFocus()
-        NSColor.black.setStroke()
-        let lid = NSBezierPath()
-        lid.lineWidth = 1.5
-        lid.move(to: NSPoint(x: 6, y: 16))
-        lid.line(to: NSPoint(x: 16, y: 16))
-        lid.move(to: NSPoint(x: 9, y: 18))
-        lid.line(to: NSPoint(x: 13, y: 18))
-        lid.stroke()
-        let bin = NSBezierPath(roundedRect: NSRect(x: 7, y: 5, width: 8, height: 10), xRadius: 1.5, yRadius: 1.5)
-        bin.lineWidth = 1.5
-        bin.stroke()
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 6.5, weight: .bold),
-            .foregroundColor: NSColor.black
-        ]
-        ("ALL" as NSString).draw(at: NSPoint(x: 4.2, y: 1.5), withAttributes: attrs)
-        image.unlockFocus()
-        image.isTemplate = true
-        return image
-    }
-
     private func loupeIcon() -> NSImage {
         let image = NSImage(size: NSSize(width: 22, height: 22))
         image.lockFocus()
@@ -934,8 +910,7 @@ final class LegacyWindowController: NSViewController {
         let title = label("任务列表", size: 13, weight: .semibold)
         let taskCount = label("0", size: 10, weight: .medium, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         taskCount.identifier = NSUserInterfaceItemIdentifier("taskCountLabel")
-        let openTaskFolderButton = imageButton(revealIcon(), action: #selector(openCurrentTaskFolder), help: "打开当前任务文件夹")
-        let titleRow = NSStackView(views: [title, taskCount, openTaskFolderButton])
+        let titleRow = NSStackView(views: [title, taskCount])
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
         titleRow.distribution = .fill
@@ -986,7 +961,7 @@ final class LegacyWindowController: NSViewController {
         let title = label("参数设置", size: 15, weight: .bold)
         let add = iconButton("NSAddTemplate", action: #selector(addBox), help: "新增红框")
         let deleteCrop = imageButton(minusCropIcon(), action: #selector(deleteCurrentCrop), help: "删除当前选中的红框")
-        let clearAllCrops = imageButton(trashAllIcon(), action: #selector(clearCurrentCrops), help: "删除当前预览图所有选框")
+        let clearAllCrops = iconButton("NSTrashFull", action: #selector(clearCurrentCrops), help: "删除当前预览图所有选框")
         let toolRow = NSStackView(views: [add, deleteCrop, clearAllCrops])
         toolRow.orientation = .horizontal
         toolRow.alignment = .centerY
@@ -1024,8 +999,19 @@ final class LegacyWindowController: NSViewController {
         detectionReportLabel.font = NSFont(name: "Menlo", size: 10) ?? NSFont.systemFont(ofSize: 10)
         detectionReportLabel.maximumNumberOfLines = 6
         detectionReportLabel.lineBreakMode = .byWordWrapping
-        let shortcutLabel = label("快捷键：方向键移动选中框 · Command＋方向键移动全部框 · A 新增 · S/Delete 删除 · D 放大镜", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
-        shortcutLabel.maximumNumberOfLines = 4
+        let shortcutLabel = label(
+            "快捷键\n" +
+            "A：新增选框\n" +
+            "S / Delete：删除当前选框\n" +
+            "方向键：移动选中框\n" +
+            "Command＋方向键：移动全部选框\n" +
+            "D：开关放大镜\n" +
+            "鼠标滚轮：缩放画布\n" +
+            "Command / Shift＋点击：多选任务",
+            size: 9,
+            color: NSColor(calibratedWhite: 0.58, alpha: 1)
+        )
+        shortcutLabel.maximumNumberOfLines = 8
         shortcutLabel.lineBreakMode = .byWordWrapping
 
         let cropSection = sectionCard(
@@ -1079,7 +1065,7 @@ final class LegacyWindowController: NSViewController {
             algorithmSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
             exportSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
             algorithmListStack.widthAnchor.constraint(equalTo: algorithmSection.widthAnchor, constant: -16),
-            algorithmListStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 183),
+            algorithmListStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 130),
             formatPopup.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
             dustStrengthSlider.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
             shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
@@ -1267,18 +1253,19 @@ final class LegacyWindowController: NSViewController {
     private func updateControlTextColors(in root: NSView, textColor: NSColor) {
         for subview in root.subviews {
             if let popup = subview as? NSPopUpButton {
-                popup.contentTintColor = textColor
+                let popupTextColor = NSColor.black
+                popup.contentTintColor = popupTextColor
                 let font = popup.font ?? NSFont.systemFont(ofSize: 12)
                 for item in popup.itemArray {
                     item.attributedTitle = NSAttributedString(
                         string: item.title,
-                        attributes: [.foregroundColor: textColor, .font: font]
+                        attributes: [.foregroundColor: popupTextColor, .font: font]
                     )
                 }
                 if let title = popup.selectedItem?.title {
                     popup.attributedTitle = NSAttributedString(
                         string: title,
-                        attributes: [.foregroundColor: textColor, .font: font]
+                        attributes: [.foregroundColor: popupTextColor, .font: font]
                     )
                 }
             } else if let button = subview as? NSButton,
@@ -1707,8 +1694,10 @@ final class LegacyWindowController: NSViewController {
 
             let remove = iconButton("NSTrashFull", action: #selector(deleteTaskFromList(_:)), help: "删除这个任务")
             remove.tag = index
+            let reveal = imageButton(revealIcon(), action: #selector(openTaskFolderFromList(_:)), help: "打开这个任务的文件夹")
+            reveal.tag = index
 
-            for item in [select, checkbox, name, detail, remove] {
+            for item in [select, checkbox, name, detail, reveal, remove] {
                 row.addSubview(item)
             }
             taskListStack.addArrangedSubview(row)
@@ -1724,11 +1713,15 @@ final class LegacyWindowController: NSViewController {
                 checkbox.widthAnchor.constraint(equalToConstant: 18),
                 checkbox.heightAnchor.constraint(equalToConstant: 18),
                 name.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 7),
-                name.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -6),
+                name.trailingAnchor.constraint(equalTo: reveal.leadingAnchor, constant: -6),
                 name.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
                 detail.leadingAnchor.constraint(equalTo: name.leadingAnchor),
                 detail.trailingAnchor.constraint(equalTo: name.trailingAnchor),
                 detail.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 3),
+                reveal.widthAnchor.constraint(equalToConstant: 26),
+                reveal.heightAnchor.constraint(equalToConstant: 24),
+                reveal.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                reveal.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -4),
                 remove.widthAnchor.constraint(equalToConstant: 26),
                 remove.heightAnchor.constraint(equalToConstant: 24),
                 remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
@@ -1808,7 +1801,7 @@ final class LegacyWindowController: NSViewController {
                 tile.addSubview(button)
                 tile.addSubview(deleteButton)
                 NSLayoutConstraint.activate([
-                    tile.widthAnchor.constraint(equalToConstant: 206),
+                    tile.widthAnchor.constraint(equalToConstant: 166),
                     tile.heightAnchor.constraint(equalToConstant: 44),
                     imageView.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
                     imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
@@ -2021,6 +2014,12 @@ final class LegacyWindowController: NSViewController {
         }
         NSWorkspace.shared.open(task.rootURL)
         statusLabel.stringValue = "已打开当前任务文件夹。"
+    }
+
+    @objc private func openTaskFolderFromList(_ sender: NSButton) {
+        guard tasks.indices.contains(sender.tag) else { return }
+        NSWorkspace.shared.open(tasks[sender.tag].rootURL)
+        statusLabel.stringValue = "已打开任务文件夹：\(tasks[sender.tag].name)"
     }
 
     @objc private func deleteSelectedTask() {
