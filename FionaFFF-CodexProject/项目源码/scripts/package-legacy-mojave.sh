@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXECUTABLE_NAME="fiona-spotter-tool"
-APP_VERSION="0.35.5"
-APP_BUILD="76"
+APP_VERSION="0.35.6"
+APP_BUILD="77"
 APP_DISPLAY_NAME="FionaFFF Test Mojave $APP_VERSION-$APP_BUILD"
-APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0355.b76"
+APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0356.b77"
 RELEASE_BASE_NAME="FionaFFF-Test-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -88,14 +88,12 @@ SCRIPT
 chmod +x "$EXECUTABLE"
 
 cp "Sources/ImgSlicer/Resources/AppIconSource.png" "$RESOURCES/AppIconSource.png"
-if ! swift scripts/generate-icon.swift "$RESOURCES/AppIcon.icns" "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png"; then
-  FALLBACK_ICON="$ROOT_DIR/Sources/ImgSlicer/Resources/AppIcon.icns"
-  if [ -f "$FALLBACK_ICON" ]; then
-    cp "$FALLBACK_ICON" "$RESOURCES/AppIcon.icns"
-  else
-    echo "无法生成 AppIcon.icns，且没有找到可复用的旧图标。" >&2
-    exit 1
-  fi
+FALLBACK_ICON="$ROOT_DIR/Sources/ImgSlicer/Resources/AppIcon.icns"
+if [ -f "$FALLBACK_ICON" ]; then
+  cp "$FALLBACK_ICON" "$RESOURCES/AppIcon.icns"
+elif ! swift scripts/generate-icon.swift "$RESOURCES/AppIcon.icns" "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png"; then
+  echo "无法生成 AppIcon.icns，且没有找到可复用的旧图标。" >&2
+  exit 1
 fi
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
