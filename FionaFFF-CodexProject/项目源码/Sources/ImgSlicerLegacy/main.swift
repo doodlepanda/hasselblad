@@ -496,8 +496,53 @@ final class LegacyWindowController: NSViewController {
 
     private func button(_ title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        prepareStableButton(button)
         return button
+    }
+
+    private func prepareStableButton(_ button: NSButton, role: String = "standard") {
+        button.identifier = NSUserInterfaceItemIdentifier("stableButton.\(role)")
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 5
+        button.layer?.borderWidth = 1
+        applyStableButtonColors(button)
+    }
+
+    private func applyStableButtonColors(_ button: NSButton) {
+        let isPrimary = button.identifier?.rawValue.hasSuffix(".primary") == true
+        let background: NSColor
+        let border: NSColor
+        let foreground: NSColor
+        if usesLightTheme {
+            background = isPrimary
+                ? NSColor(calibratedRed: 0.78, green: 0.86, blue: 0.96, alpha: 1)
+                : NSColor(calibratedWhite: 0.90, alpha: 1)
+            border = isPrimary
+                ? NSColor(calibratedRed: 0.38, green: 0.55, blue: 0.76, alpha: 1)
+                : NSColor(calibratedWhite: 0.68, alpha: 1)
+            foreground = NSColor(calibratedWhite: 0.12, alpha: 1)
+        } else {
+            background = isPrimary
+                ? NSColor(calibratedRed: 0.22, green: 0.31, blue: 0.43, alpha: 1)
+                : NSColor(calibratedWhite: 0.23, alpha: 1)
+            border = isPrimary
+                ? NSColor(calibratedRed: 0.39, green: 0.56, blue: 0.78, alpha: 1)
+                : NSColor(calibratedWhite: 0.34, alpha: 1)
+            foreground = NSColor(calibratedWhite: 0.94, alpha: 1)
+        }
+        button.layer?.backgroundColor = background.cgColor
+        button.layer?.borderColor = border.cgColor
+        button.contentTintColor = foreground
+        if !button.title.isEmpty {
+            button.attributedTitle = NSAttributedString(
+                string: button.title,
+                attributes: [
+                    .foregroundColor: foreground,
+                    .font: button.font ?? NSFont.systemFont(ofSize: 12)
+                ]
+            )
+        }
     }
 
     private func iconImage(_ name: String) -> NSImage? {
@@ -653,7 +698,7 @@ final class LegacyWindowController: NSViewController {
 
     private func imageButton(_ image: NSImage?, title: String = "", action: Selector, help: String) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .texturedRounded
+        prepareStableButton(button)
         button.image = image
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeft
         button.toolTip = help
@@ -673,7 +718,7 @@ final class LegacyWindowController: NSViewController {
 
     private func applyAllButton(title: String = "", compact: Bool = false) -> NSButton {
         let button = NSButton(title: title, target: self, action: #selector(applyCropsToCurrentTask))
-        button.bezelStyle = .texturedRounded
+        prepareStableButton(button)
         button.image = stackedRectanglesIcon()
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeft
         button.toolTip = "以左上第一帧黑边为基准，将当前红框应用到全部图片"
@@ -731,7 +776,7 @@ final class LegacyWindowController: NSViewController {
         fileActions.spacing = 6
 
         let identifyButton = NSButton(title: "自动识别", target: self, action: #selector(autoIdentify))
-        identifyButton.bezelStyle = .texturedRounded
+        prepareStableButton(identifyButton, role: "primary")
         identifyButton.image = magicWandIcon()
         identifyButton.imagePosition = .imageLeft
         identifyButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
@@ -1082,6 +1127,7 @@ final class LegacyWindowController: NSViewController {
             panel.layer?.borderColor = borderColor.cgColor
         }
         updateSectionTones(in: view)
+        updateStableButtonColors(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
     }
@@ -1094,6 +1140,16 @@ final class LegacyWindowController: NSViewController {
                 applySectionTone(subview, tone: tone)
             }
             updateSectionTones(in: subview)
+        }
+    }
+
+    private func updateStableButtonColors(in root: NSView) {
+        for subview in root.subviews {
+            if let button = subview as? NSButton,
+               button.identifier?.rawValue.hasPrefix("stableButton.") == true {
+                applyStableButtonColors(button)
+            }
+            updateStableButtonColors(in: subview)
         }
     }
 
@@ -1132,7 +1188,7 @@ final class LegacyWindowController: NSViewController {
 
     private func repeatingArrowButton(_ title: String, action: Selector, help: String) -> NSButton {
         let button = LegacyRepeatingButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        prepareStableButton(button)
         button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         button.toolTip = help
         button.translatesAutoresizingMaskIntoConstraints = false
