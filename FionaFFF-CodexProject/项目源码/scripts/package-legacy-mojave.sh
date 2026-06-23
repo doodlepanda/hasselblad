@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXECUTABLE_NAME="fiona-spotter-tool"
-APP_VERSION="0.35.6"
-APP_BUILD="77"
+APP_VERSION="0.35.7"
+APP_BUILD="78"
 APP_DISPLAY_NAME="FionaFFF Test Mojave $APP_VERSION-$APP_BUILD"
-APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0356.b77"
+APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0357.b78"
 RELEASE_BASE_NAME="FionaFFF-Test-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -62,7 +62,9 @@ swiftc \
 cat > "$EXECUTABLE" <<'SCRIPT'
 #!/bin/bash
 
-LOG="$HOME/Desktop/fionafff-mojave-launcher.log"
+LOG_DIR="$HOME/Library/Logs/FionaFFF"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp"
+LOG="$LOG_DIR/fionafff-mojave-launcher.log"
 APP_MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_CONTENTS_DIR="$(cd "$APP_MACOS_DIR/.." && pwd)"
 REAL_EXECUTABLE="$APP_MACOS_DIR/fiona-spotter-tool-bin"
@@ -80,21 +82,29 @@ fi
   echo "Frameworks:"
   ls -la "$APP_CONTENTS_DIR/Frameworks" 2>&1 || true
   echo "Running app binary..."
-} >> "$LOG" 2>&1
+} >> "$LOG" 2>&1 || true
 
-exec "$REAL_EXECUTABLE" >> "$LOG" 2>&1
+exec "$REAL_EXECUTABLE" >> "$LOG" 2>&1 || exec "$REAL_EXECUTABLE"
 SCRIPT
 
 chmod +x "$EXECUTABLE"
 
 cp "Sources/ImgSlicer/Resources/AppIconSource.png" "$RESOURCES/AppIconSource.png"
-FALLBACK_ICON="$ROOT_DIR/Sources/ImgSlicer/Resources/AppIcon.icns"
-if [ -f "$FALLBACK_ICON" ]; then
-  cp "$FALLBACK_ICON" "$RESOURCES/AppIcon.icns"
-elif ! swift scripts/generate-icon.swift "$RESOURCES/AppIcon.icns" "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png"; then
-  echo "无法生成 AppIcon.icns，且没有找到可复用的旧图标。" >&2
-  exit 1
-fi
+ICONSET="$RESOURCES/AppIcon.iconset"
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+sips -z 16 16     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_16x16.png" >/dev/null
+sips -z 32 32     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+sips -z 32 32     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_32x32.png" >/dev/null
+sips -z 64 64     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+sips -z 128 128   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_128x128.png" >/dev/null
+sips -z 256 256   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+sips -z 256 256   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_256x256.png" >/dev/null
+sips -z 512 512   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+sips -z 512 512   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_512x512.png" >/dev/null
+sips -z 1024 1024 "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
+rm -rf "$ICONSET"
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -250,7 +260,8 @@ for OLD_APP in \
   "/Applications/FionaFFF Test Mojave 0.35.2.app" \
   "/Applications/FionaFFF Test Mojave 0.35.3-74.app" \
   "/Applications/FionaFFF Test Mojave 0.35.4-75.app" \
-  "/Applications/FionaFFF Test Mojave 0.35.5-76.app"; do
+  "/Applications/FionaFFF Test Mojave 0.35.5-76.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.6-77.app"; do
   if [ -e "$OLD_APP" ] && [ "$OLD_APP" != "$TARGET_APP" ]; then
     echo "正在移除旧测试版：$OLD_APP"
     if ! rm -rf "$OLD_APP" 2>/dev/null; then
