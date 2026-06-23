@@ -2446,7 +2446,7 @@ enum LegacyFrameDetector {
         }
 
         let negativeRects = detectNegativeFilmRects(url: url)
-        if negativeRects.count > 1 {
+        if !negativeRects.isEmpty {
             let isCompleteTwoBySix = negativeRects.count == 12 && hasCompleteTwoRowSixCoverage(negativeRects)
             let partialStripBonus = negativeRects.count >= 3 && negativeRects.count < 12 ? 0.34 : 0
             candidates.append(LegacyDetectionCandidate(
@@ -2481,14 +2481,21 @@ enum LegacyFrameDetector {
         if let gray = analysis {
             let luminances = gray.bytes.map { Double($0) / 255.0 }
             candidates = candidates.map { candidate in
-                LegacyDetectionCandidate(
+                let isAlreadyRefinedFilmCandidate =
+                    candidate.title == "按实际张数识别" ||
+                    candidate.title == "浅色/黑色片距"
+                return LegacyDetectionCandidate(
                     title: candidate.title,
                     detail: candidate.detail,
-                    rects: refineRasterCandidateRects(
-                        candidate.rects,
-                        luminances: luminances,
-                        width: gray.width,
-                        height: gray.height
+                    rects: (
+                        isAlreadyRefinedFilmCandidate
+                            ? candidate.rects
+                            : refineRasterCandidateRects(
+                                candidate.rects,
+                                luminances: luminances,
+                                width: gray.width,
+                                height: gray.height
+                            )
                     ).map(rasterRectToDisplayRect),
                     score: candidate.score
                 )
@@ -2506,7 +2513,12 @@ enum LegacyFrameDetector {
 
         let ranked = candidates
             .map { candidate -> LegacyDetectionCandidate in
-                let rects = nonOverlappingRects(candidate.rects)
+                let preservesDetectedFilmFrames =
+                    candidate.title == "按实际张数识别" ||
+                    candidate.title == "浅色/黑色片距"
+                let rects = preservesDetectedFilmFrames
+                    ? candidate.rects.map { $0.normalized }.sortedForReadingOrder()
+                    : nonOverlappingRects(candidate.rects)
                 return LegacyDetectionCandidate(title: candidate.title, detail: candidate.detail, rects: rects, score: max(0, min(1, candidate.score)))
             }
             .filter { !$0.rects.isEmpty }
@@ -2526,7 +2538,7 @@ enum LegacyFrameDetector {
         let luminances = gray.bytes.map { Double($0) / 255.0 }
 
         let horizontalRects = detectHorizontalNegativeFilmRects(luminances: luminances, width: width, height: height)
-        if horizontalRects.count >= 4 {
+        if !horizontalRects.isEmpty {
             return horizontalRects.sortedForReadingOrder()
         }
 
@@ -2572,7 +2584,7 @@ enum LegacyFrameDetector {
                 && aspect <= 2.2
                 && !(rect.width > 0.92 && rect.height > 0.92)
         }
-        guard filtered.count > 1 else { return [] }
+        guard !filtered.isEmpty else { return [] }
         return filtered.sortedForReadingOrder()
     }
 
@@ -2673,7 +2685,10 @@ enum LegacyFrameDetector {
             return rects.sortedForReadingOrder()
         }
 
-        let filtered = mergeNormalizedRects(rects, overlapThreshold: 0.42).filter { rect in
+        let normalizedRects = filmRows.count == 1
+            ? rects.map { $0.normalized }
+            : mergeNormalizedRects(rects, overlapThreshold: 0.42)
+        let filtered = normalizedRects.filter { rect in
             let aspect = rect.width / max(rect.height, 0.001)
             let minimumAspect: CGFloat = Double(width) / Double(height) >= 3.0 ? 0.16 : 0.32
             return rect.area > 0.006
@@ -2749,19 +2764,6 @@ enum LegacyFrameDetector {
             ?? IntSegment(start: 0, end: width)
         let activeWidth = max(1, activeRange.size)
         let estimatedCount = max(1, Int(round(Double(activeWidth) / (Double(max(1, rowHeight)) * 1.55))))
-        if estimatedCount >= 5 && estimatedCount <= 7 {
-            return keepConsistentNegativeFrames(horizontalRegularFrames(
-                count: estimatedCount,
-                xStart: activeRange.start,
-                xEnd: activeRange.end,
-                yStart: yRange.start,
-                yEnd: yRange.end,
-                separators: separators,
-                luminances: luminances,
-                width: width,
-                height: height
-            ))
-        }
 
         var boundaries: [IntSegment] = []
         if let first = separators.first, first.start > max(8, width / 24) {
@@ -2782,6 +2784,24 @@ enum LegacyFrameDetector {
             frames.append(refineNegativeFrameRect(xStart: left, xEnd: right, yStart: yStart, yEnd: yEnd, luminances: luminances, width: width, height: height))
         }
 
+        let contentFrames = horizontalContentFrames(
+            bodyScore: bodyScore,
+            yStart: yRange.start,
+            yEnd: yRange.end,
+            luminances: luminances,
+            width: width,
+            height: height
+        )
+        if !contentFrames.isEmpty, contentFrames.count <= 4 {
+            return contentFrames
+        }
+        if !frames.isEmpty, frames.count <= 4 {
+            return frames
+        }
+        if contentFrames.count >= 5, contentFrames.count <= 12 {
+            return contentFrames
+        }
+
         guard estimatedCount >= 3 && estimatedCount <= 12 else {
             return keepConsistentNegativeFrames(frames)
         }
@@ -2797,10 +2817,64 @@ enum LegacyFrameDetector {
             width: width,
             height: height
         )
-        if regularFrames.count > frames.count || (estimatedCount >= 5 && frames.count != estimatedCount) {
+        let internalSeparators = separators.filter {
+            $0.mid > activeRange.start && $0.mid < activeRange.end
+        }
+        let hasRegularSeparatorEvidence = internalSeparators.count >= max(2, estimatedCount - 2)
+        if hasRegularSeparatorEvidence,
+           (regularFrames.count > frames.count || (estimatedCount >= 5 && frames.count != estimatedCount)) {
             return keepConsistentNegativeFrames(regularFrames)
         }
         return keepConsistentNegativeFrames(frames)
+    }
+
+    private static func horizontalContentFrames(
+        bodyScore: [Double],
+        yStart: Int,
+        yEnd: Int,
+        luminances: [Double],
+        width: Int,
+        height: Int
+    ) -> [CGRect] {
+        guard !bodyScore.isEmpty, yEnd > yStart else { return [] }
+        let rowHeight = yEnd - yStart
+        let smoothed = movingAverage(bodyScore, window: max(3, width / 900))
+        let segments = mergeCloseSegments(
+            thresholdSegments(
+                values: smoothed,
+                threshold: 0.14,
+                minimumSize: max(18, rowHeight / 5),
+                lessThan: false
+            ),
+            maxGap: max(4, rowHeight / 20)
+        ).filter { segment in
+            segment.size >= max(24, rowHeight / 4)
+                && segment.size <= max(80, Int(Double(rowHeight) * 3.6))
+        }
+        guard segments.count <= 12 else { return [] }
+        return segments.compactMap { segment in
+            let padding = max(2, min(segment.size / 35, rowHeight / 30))
+            let left = min(segment.end - 1, segment.start + padding)
+            let right = max(left + 1, segment.end - padding)
+            guard right - left >= max(24, rowHeight / 5),
+                  hasFrameContent(
+                    xStart: left,
+                    xEnd: right,
+                    yStart: yStart,
+                    yEnd: yEnd,
+                    luminances: luminances,
+                    width: width
+                  ) else { return nil }
+            return refineNegativeFrameRect(
+                xStart: left,
+                xEnd: right,
+                yStart: yStart,
+                yEnd: yEnd,
+                luminances: luminances,
+                width: width,
+                height: height
+            )
+        }
     }
 
     private static func horizontalRegularFrames(count: Int, xStart: Int, xEnd: Int, yStart: Int, yEnd: Int, separators: [IntSegment], luminances: [Double], width: Int, height: Int) -> [CGRect] {
