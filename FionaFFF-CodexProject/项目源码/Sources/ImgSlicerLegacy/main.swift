@@ -328,6 +328,11 @@ final class LegacyTaskRowView: NSView {
 }
 
 final class LegacyWindowController: NSViewController {
+    private enum DetectionSizingMode: Int {
+        case fixedFirstManual
+        case adaptiveBoundary
+    }
+
     private let canvas = LegacyCanvasView()
     private let statusLabel = NSTextField(labelWithString: "拖入或导入 TIFF/JPG 文件开始。")
     private let fileNameLabel = NSTextField(labelWithString: "未导入文件")
@@ -335,6 +340,7 @@ final class LegacyWindowController: NSViewController {
     private let cropCountLabel = NSTextField(labelWithString: "红框 0 个")
     private let detectionReportLabel = NSTextField(labelWithString: "算法候选：等待识别")
     private let algorithmListStack = NSStackView()
+    private let detectionModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let taskListScroll = NSScrollView()
     private let taskListStack = LegacyFlippedStackView()
     private let photoPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -360,6 +366,7 @@ final class LegacyWindowController: NSViewController {
     private var imageAspectCache: [String: Double] = [:]
     private var detectionCandidatesByPhotoPath: [String: [LegacyDetectionCandidate]] = [:]
     private var selectedAlgorithmIndexByPhotoPath: [String: Int] = [:]
+    private var detectionSizingMode: DetectionSizingMode = .fixedFirstManual
     private var usesLightTheme = false
     private weak var topBarView: NSView?
     private weak var leftPanelView: NSView?
@@ -413,6 +420,10 @@ final class LegacyWindowController: NSViewController {
         dustStrengthSlider.action = #selector(dustStrengthChanged)
         photoPopup.target = self
         photoPopup.action = #selector(photoSelectionChanged)
+        detectionModePopup.addItems(withTitles: ["固定第一手动框大小", "自动适应画面边界"])
+        detectionModePopup.selectItem(at: DetectionSizingMode.fixedFirstManual.rawValue)
+        detectionModePopup.target = self
+        detectionModePopup.action = #selector(detectionModeChanged)
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.wantsLayer = true
         canvas.layer?.cornerRadius = 8
@@ -874,6 +885,8 @@ final class LegacyWindowController: NSViewController {
         identifyButton.toolTip = "自动识别当前任务画面"
         identifyButton.translatesAutoresizingMaskIntoConstraints = false
         identifyButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        detectionModePopup.translatesAutoresizingMaskIntoConstraints = false
+        detectionModePopup.toolTip = "选择按第一手动框固定大小，或让每个选框自动适应画面边界"
         let applyButton = applyAllButton()
         let rotateLeftButton = arrowButton("↶", action: #selector(rotateSelectedCropLeft), help: "当前选中红框向左旋转 0.5 度")
         let rotateRightButton = arrowButton("↷", action: #selector(rotateSelectedCropRight), help: "当前选中红框向右旋转 0.5 度")
@@ -907,6 +920,7 @@ final class LegacyWindowController: NSViewController {
 
         let fileSection = sectionCard(title: "文件操作", views: [fileActions], tone: 0)
         let toolsContent = NSStackView(views: [
+            detectionModePopup,
             identifyButton,
             rotateActions,
             zoomActions,
@@ -951,6 +965,7 @@ final class LegacyWindowController: NSViewController {
             toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
             toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
             toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 8),
+            detectionModePopup.widthAnchor.constraint(equalTo: toolsSection.widthAnchor, constant: -16),
             identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor, constant: -16),
 
             taskSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
@@ -1534,7 +1549,17 @@ final class LegacyWindowController: NSViewController {
               candidates.indices.contains(sender.tag) else { return }
         selectedAlgorithmIndexByPhotoPath[photoKey(photo.url)] = sender.tag
         let candidate = candidates[sender.tag]
-        let crops = candidate.rects.sortedForReadingOrder().map { LegacyCrop(rect: $0.normalized) }
+        let crops: [LegacyCrop]
+        switch detectionSizingMode {
+        case .fixedFirstManual:
+            guard let template = Self.currentFixedTemplate(from: canvas.crops, fallback: templateRect ?? canvas.currentTemplateRect) else {
+                statusLabel.stringValue = "请先手动调整第一个红框，作为固定识别尺寸。"
+                return
+            }
+            crops = Self.templateSizedCrops(from: candidate.rects, template: template)
+        case .adaptiveBoundary:
+            crops = candidate.rects.sortedForReadingOrder().map { LegacyCrop(rect: $0.normalized) }
+        }
         guard !crops.isEmpty else { return }
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = crops
         canvas.crops = crops
@@ -1542,9 +1567,36 @@ final class LegacyWindowController: NSViewController {
         canvas.needsDisplay = true
         templateRect = crops.sortedForReadingOrder().first?.rect
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: crops, candidates: candidates).reportText
-        statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。每个红框使用自动识别边界。"
+        let modeText = detectionSizingMode == .fixedFirstManual ? "已固定为第一手动框大小。" : "每个红框使用自动识别边界。"
+        statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。\(modeText)"
         rebuildAlgorithmPopup(for: tasks[selectedTaskIndex].photos[selectedPhotoIndex])
         refreshSummary()
+    }
+
+    @objc private func detectionModeChanged() {
+        detectionSizingMode = DetectionSizingMode(rawValue: detectionModePopup.indexOfSelectedItem) ?? .fixedFirstManual
+        statusLabel.stringValue = detectionSizingMode == .fixedFirstManual
+            ? "识别模式：以第一个手动调整红框为固定大小。"
+            : "识别模式：每个画面自动适应边界。"
+    }
+
+    private static func currentFixedTemplate(from crops: [LegacyCrop], fallback: CGRect?) -> CGRect? {
+        if let first = crops.sortedForReadingOrder().first?.rect.normalized {
+            return first
+        }
+        return fallback?.normalized
+    }
+
+    private static func templateSizedCrops(from rects: [CGRect], template: CGRect) -> [LegacyCrop] {
+        let fixed = template.normalized
+        let width = min(max(fixed.width, 0.001), 1)
+        let height = min(max(fixed.height, 0.001), 1)
+        return rects.sortedForReadingOrder().map { rect in
+            let normalized = rect.normalized
+            let x = min(max(normalized.midX - width / 2, 0), max(0, 1 - width))
+            let y = min(max(normalized.midY - height / 2, 0), max(0, 1 - height))
+            return LegacyCrop(rect: CGRect(x: x, y: y, width: width, height: height).normalized)
+        }
     }
 
     private func saveCurrentCrops(updateTemplateAspect: Bool = true) {
@@ -2147,15 +2199,32 @@ final class LegacyWindowController: NSViewController {
             statusLabel.stringValue = "没有可识别的已选任务。"
             return
         }
+        let mode = detectionSizingMode
+        let template = templateRect ?? canvas.currentTemplateRect
+        if mode == .fixedFirstManual && template == nil {
+            statusLabel.stringValue = "请先手动调整第一个红框，再使用固定大小识别。"
+            return
+        }
         let selectedTask = selectedTaskIndex
         let selectedPhoto = selectedPhotoIndex
         let snapshots = taskIndexes.map { ($0, tasks[$0].photos) }
         let photoCount = snapshots.reduce(0) { $0 + $1.1.count }
-        statusLabel.stringValue = "正在按实际画面边界识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
+        statusLabel.stringValue = mode == .fixedFirstManual
+            ? "正在按第一个手动框的固定大小识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
+            : "正在按实际画面边界识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
         DispatchQueue.global(qos: .userInitiated).async {
             let results = snapshots.map { taskIndex, photos in
                 let detections = photos.map { photo -> LegacyDetectionResult in
-                    LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                    if mode == .fixedFirstManual, let template {
+                        let result = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
+                        if result.crops.isEmpty {
+                            return LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: result.candidates)
+                        }
+                        let candidate = result.candidates.first
+                        let fixed = Self.templateSizedCrops(from: candidate?.rects ?? result.crops.map(\.rect), template: template)
+                        return LegacyDetectionResult(crops: fixed, candidates: result.candidates)
+                    }
+                    return LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
                 }
                 return (taskIndex, photos, detections)
             }
