@@ -2254,12 +2254,11 @@ final class LegacyCanvasView: NSView {
             let r = viewRect(from: crop.rect, imageRect: rect)
             let path = rotatedRectPath(rect: r, angle: crop.angle)
             if index == selectedIndex {
-                NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.06, alpha: 1).setStroke()
-                path.lineWidth = 1.35
+                NSColor(calibratedRed: 0.82, green: 0.50, blue: 0.00, alpha: 1).setStroke()
             } else {
-                NSColor(calibratedRed: 0.96, green: 0.12, blue: 0.10, alpha: 0.92).setStroke()
-                path.lineWidth = 0.65
+                NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.06, alpha: 1).setStroke()
             }
+            path.lineWidth = 1.35
             path.stroke()
         }
         NSGraphicsContext.current?.restoreGraphicsState()
@@ -2754,7 +2753,7 @@ final class LegacyCanvasView: NSView {
             width: cropViewRect.width / imageRect.width * displayImage.size.width * scaleX,
             height: cropViewRect.height / imageRect.height * displayImage.size.height * scaleY
         )
-        NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.06, alpha: 1).setStroke()
+        NSColor(calibratedRed: 0.82, green: 0.50, blue: 0.00, alpha: 1).setStroke()
         let cropPath = rotatedRectPath(rect: cropLensRect, angle: activeCrop.angle)
         cropPath.lineWidth = 1.35
         cropPath.stroke()
