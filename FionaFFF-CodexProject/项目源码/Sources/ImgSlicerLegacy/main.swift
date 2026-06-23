@@ -2691,7 +2691,8 @@ enum LegacyFrameDetector {
 
     static func detectBestTemplateCropsWithReport(url: URL, template: CGRect) -> LegacyDetectionResult {
         var candidates: [LegacyDetectionCandidate] = []
-        if let gray = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096) {
+        let analysis = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096)
+        if let gray = analysis {
             let luminances = gray.bytes.map { Double($0) / 255.0 }
             let strictRects = detectTwoRowSixFrameRects(luminances: luminances, width: gray.width, height: gray.height)
             if strictRects.count == 12 {
@@ -2730,6 +2731,32 @@ enum LegacyFrameDetector {
                 rects: centerCrops.map(\.rect),
                 score: scoreCandidate(centerCrops.map(\.rect), expectedCount: nil) + 0.30
             ))
+        }
+
+        if let gray = analysis {
+            let luminances = gray.bytes.map { Double($0) / 255.0 }
+            candidates = candidates.map { candidate in
+                LegacyDetectionCandidate(
+                    title: candidate.title,
+                    detail: candidate.detail,
+                    rects: refineRasterCandidateRects(
+                        candidate.rects,
+                        luminances: luminances,
+                        width: gray.width,
+                        height: gray.height
+                    ).map(rasterRectToDisplayRect),
+                    score: candidate.score
+                )
+            }
+        } else {
+            candidates = candidates.map { candidate in
+                LegacyDetectionCandidate(
+                    title: candidate.title,
+                    detail: candidate.detail,
+                    rects: candidate.rects.map(rasterRectToDisplayRect),
+                    score: candidate.score
+                )
+            }
         }
 
         let ranked = candidates
@@ -3316,6 +3343,73 @@ enum LegacyFrameDetector {
         ).normalized
     }
 
+    private static func refineRasterCandidateRects(_ rects: [CGRect], luminances: [Double], width: Int, height: Int) -> [CGRect] {
+        rects.compactMap { rawRect in
+            let rect = rawRect.normalized
+            let xStart = min(max(Int(floor(rect.minX * CGFloat(width))), 0), width - 1)
+            let xEnd = min(max(Int(ceil(rect.maxX * CGFloat(width))), xStart + 1), width)
+            let yStart = min(max(Int(floor(rect.minY * CGFloat(height))), 0), height - 1)
+            let yEnd = min(max(Int(ceil(rect.maxY * CGFloat(height))), yStart + 1), height)
+            guard hasFrameContent(
+                xStart: xStart,
+                xEnd: xEnd,
+                yStart: yStart,
+                yEnd: yEnd,
+                luminances: luminances,
+                width: width
+            ) else { return nil }
+            return refineNegativeFrameRect(
+                xStart: xStart,
+                xEnd: xEnd,
+                yStart: yStart,
+                yEnd: yEnd,
+                luminances: luminances,
+                width: width,
+                height: height
+            )
+        }
+    }
+
+    private static func hasFrameContent(xStart: Int, xEnd: Int, yStart: Int, yEnd: Int, luminances: [Double], width: Int) -> Bool {
+        let sampleStep = max(1, min(xEnd - xStart, yEnd - yStart) / 180)
+        var samples = 0
+        var imageLike = 0
+        var textured = 0
+        var y = yStart
+        while y < yEnd {
+            var x = xStart
+            while x < xEnd {
+                let value = luminances[y * width + x]
+                if value > 0.075 && value < 0.965 { imageLike += 1 }
+                if x + sampleStep < xEnd,
+                   abs(value - luminances[y * width + x + sampleStep]) > 0.035 {
+                    textured += 1
+                }
+                if y + sampleStep < yEnd,
+                   abs(value - luminances[(y + sampleStep) * width + x]) > 0.035 {
+                    textured += 1
+                }
+                samples += 1
+                x += sampleStep
+            }
+            y += sampleStep
+        }
+        guard samples > 0 else { return false }
+        let imageRatio = Double(imageLike) / Double(samples)
+        let textureRatio = Double(textured) / Double(samples * 2)
+        return imageRatio >= 0.055 || textureRatio >= 0.012
+    }
+
+    private static func rasterRectToDisplayRect(_ rect: CGRect) -> CGRect {
+        let normalized = rect.normalized
+        return CGRect(
+            x: normalized.minX,
+            y: 1 - normalized.maxY,
+            width: normalized.width,
+            height: normalized.height
+        ).normalized
+    }
+
     private static func keepConsistentNegativeFrames(_ rects: [CGRect]) -> [CGRect] {
         guard rects.count > 2 else { return rects }
         let areas = rects.map(\.area)
@@ -3505,7 +3599,7 @@ enum LegacyFrameDetector {
         let bytes = gray.bytes
         let width = gray.width
         let height = gray.height
-        let rough = roughAnchor.normalized
+        let rough = rasterRectToDisplayRect(roughAnchor)
         let x0 = min(max(Int(rough.minX * CGFloat(width)), 0), width - 1)
         let y0 = min(max(Int(rough.minY * CGFloat(height)), 0), height - 1)
         let x1 = min(max(Int(rough.maxX * CGFloat(width)), x0 + 1), width)
@@ -3533,7 +3627,9 @@ enum LegacyFrameDetector {
 
         let nx = CGFloat(refinedX) / CGFloat(width)
         let ny = CGFloat(refinedY) / CGFloat(height)
-        return CGRect(x: nx, y: ny, width: template.normalized.width, height: template.normalized.height).normalized
+        return rasterRectToDisplayRect(
+            CGRect(x: nx, y: ny, width: template.normalized.width, height: template.normalized.height).normalized
+        )
     }
 
     private static func firstContentColumn(bytes: [UInt8], width: Int, xRange: ClosedRange<Int>, yRange: Range<Int>) -> Int? {
