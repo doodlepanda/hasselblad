@@ -1534,41 +1534,17 @@ final class LegacyWindowController: NSViewController {
               candidates.indices.contains(sender.tag) else { return }
         selectedAlgorithmIndexByPhotoPath[photoKey(photo.url)] = sender.tag
         let candidate = candidates[sender.tag]
-        guard let template = Self.currentFixedTemplate(from: canvas.crops, fallback: templateRect ?? canvas.currentTemplateRect) else {
-            statusLabel.stringValue = "需要先有一个参考红框尺寸。"
-            return
-        }
-        let crops = Self.templateSizedCrops(from: candidate.rects, template: template)
+        let crops = candidate.rects.sortedForReadingOrder().map { LegacyCrop(rect: $0.normalized) }
         guard !crops.isEmpty else { return }
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = crops
         canvas.crops = crops
         canvas.selectedIndex = crops.isEmpty ? nil : 0
         canvas.needsDisplay = true
-        templateRect = crops.sortedForReadingOrder().first?.rect ?? template
+        templateRect = crops.sortedForReadingOrder().first?.rect
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: crops, candidates: candidates).reportText
-        statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。红框尺寸沿用第一框。"
+        statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。每个红框使用自动识别边界。"
         rebuildAlgorithmPopup(for: tasks[selectedTaskIndex].photos[selectedPhotoIndex])
         refreshSummary()
-    }
-
-    private static func currentFixedTemplate(from crops: [LegacyCrop], fallback: CGRect?) -> CGRect? {
-        if let first = crops.sortedForReadingOrder().first?.rect.normalized {
-            return first
-        }
-        return fallback?.normalized
-    }
-
-    private static func templateSizedCrops(from rects: [CGRect], template: CGRect) -> [LegacyCrop] {
-        let fixed = template.normalized
-        let width = min(max(fixed.width, 0.001), 1)
-        let height = min(max(fixed.height, 0.001), 1)
-        let ordered = rects.sortedForReadingOrder()
-        return ordered.map { rect in
-            let normalized = rect.normalized
-            let x = min(max(normalized.midX - width / 2, 0), max(0, 1 - width))
-            let y = min(max(normalized.midY - height / 2, 0), max(0, 1 - height))
-            return LegacyCrop(rect: CGRect(x: x, y: y, width: width, height: height).normalized)
-        }
     }
 
     private func saveCurrentCrops(updateTemplateAspect: Bool = true) {
@@ -2171,23 +2147,15 @@ final class LegacyWindowController: NSViewController {
             statusLabel.stringValue = "没有可识别的已选任务。"
             return
         }
-        let template = templateRect ?? canvas.currentTemplateRect
-        guard let template else { return }
         let selectedTask = selectedTaskIndex
         let selectedPhoto = selectedPhotoIndex
         let snapshots = taskIndexes.map { ($0, tasks[$0].photos) }
         let photoCount = snapshots.reduce(0) { $0 + $1.1.count }
-        statusLabel.stringValue = "正在识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
+        statusLabel.stringValue = "正在按实际画面边界识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
         DispatchQueue.global(qos: .userInitiated).async {
             let results = snapshots.map { taskIndex, photos in
                 let detections = photos.map { photo -> LegacyDetectionResult in
-                    let result = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
-                    if result.crops.isEmpty {
-                        return LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: result.candidates)
-                    }
-                    let candidate = result.candidates.first
-                    let fixed = Self.templateSizedCrops(from: candidate?.rects ?? result.crops.map(\.rect), template: template)
-                    return LegacyDetectionResult(crops: fixed, candidates: result.candidates)
+                    LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
                 }
                 return (taskIndex, photos, detections)
             }
@@ -3477,7 +3445,15 @@ enum LegacyFrameDetector {
         detectBestTemplateCropsWithReport(url: url, template: template).crops
     }
 
+    static func detectBestAutomaticCropsWithReport(url: URL) -> LegacyDetectionResult {
+        detectBestCropsWithReport(url: url, template: nil)
+    }
+
     static func detectBestTemplateCropsWithReport(url: URL, template: CGRect) -> LegacyDetectionResult {
+        detectBestCropsWithReport(url: url, template: template)
+    }
+
+    private static func detectBestCropsWithReport(url: URL, template: CGRect?) -> LegacyDetectionResult {
         var candidates: [LegacyDetectionCandidate] = []
         let analysis = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096)
         if let gray = analysis {
@@ -3495,7 +3471,7 @@ enum LegacyFrameDetector {
                     score: min(1, scoreCandidate([singleRect], expectedCount: 1) + 0.70)
                 )
                 return LegacyDetectionResult(
-                    crops: sameSizeTemplateCrops(from: [displayRect], template: template),
+                    crops: [LegacyCrop(rect: displayRect)],
                     candidates: [candidate]
                 )
             }
@@ -3525,23 +3501,25 @@ enum LegacyFrameDetector {
                 ) + partialStripBonus
             ))
         }
-        let templateCrops = detectTemplatePositionCrops(url: url, template: template)
-        if !templateCrops.isEmpty {
-            candidates.append(LegacyDetectionCandidate(
-                title: "模板定位",
-                detail: "按当前红框尺寸定位",
-                rects: templateCrops.map(\.rect),
-                score: scoreCandidate(templateCrops.map(\.rect), expectedCount: nil) - 0.04
-            ))
-        }
-        let centerCrops = detectFrameCenters(url: url).map { crop(center: $0, size: template.size) }
-        if !centerCrops.isEmpty {
-            candidates.append(LegacyDetectionCandidate(
-                title: "中心投影",
-                detail: "旧版中心点估计",
-                rects: centerCrops.map(\.rect),
-                score: scoreCandidate(centerCrops.map(\.rect), expectedCount: nil) + 0.30
-            ))
+        if let template {
+            let templateCrops = detectTemplatePositionCrops(url: url, template: template)
+            if !templateCrops.isEmpty {
+                candidates.append(LegacyDetectionCandidate(
+                    title: "模板定位",
+                    detail: "按当前红框尺寸定位",
+                    rects: templateCrops.map(\.rect),
+                    score: scoreCandidate(templateCrops.map(\.rect), expectedCount: nil) - 0.04
+                ))
+            }
+            let centerCrops = detectFrameCenters(url: url).map { crop(center: $0, size: template.size) }
+            if !centerCrops.isEmpty {
+                candidates.append(LegacyDetectionCandidate(
+                    title: "中心投影",
+                    detail: "旧版中心点估计",
+                    rects: centerCrops.map(\.rect),
+                    score: scoreCandidate(centerCrops.map(\.rect), expectedCount: nil) + 0.30
+                ))
+            }
         }
 
         if let gray = analysis {
@@ -3594,7 +3572,12 @@ enum LegacyFrameDetector {
                 if abs($0.score - $1.score) > 0.001 { return $0.score > $1.score }
                 return $0.rects.count > $1.rects.count
             }
-        let crops = ranked.first.map { sameSizeTemplateCrops(from: $0.rects, template: template) } ?? []
+        let crops: [LegacyCrop] = ranked.first.map { candidate -> [LegacyCrop] in
+            if let template {
+                return sameSizeTemplateCrops(from: candidate.rects, template: template)
+            }
+            return candidate.rects.sortedForReadingOrder().map { LegacyCrop(rect: $0.normalized) }
+        } ?? []
         return LegacyDetectionResult(crops: crops, candidates: ranked)
     }
 
