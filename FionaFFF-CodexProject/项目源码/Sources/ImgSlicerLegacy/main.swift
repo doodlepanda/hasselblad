@@ -2561,6 +2561,11 @@ enum LegacyFrameDetector {
             return horizontalRects.sortedForReadingOrder()
         }
 
+        let vertical120Rects = detectVertical120FilmRects(luminances: luminances, width: width, height: height)
+        if !vertical120Rects.isEmpty {
+            return vertical120Rects.sortedForReadingOrder()
+        }
+
         var columnActivity = [Double](repeating: 0, count: width)
         for x in 0..<width {
             var filmLike = 0
@@ -2605,6 +2610,108 @@ enum LegacyFrameDetector {
         }
         guard !filtered.isEmpty else { return [] }
         return filtered.sortedForReadingOrder()
+    }
+
+    private static func detectVertical120FilmRects(luminances: [Double], width: Int, height: Int) -> [CGRect] {
+        guard height > width, width > 180, height > 360 else { return [] }
+        let stripAspect = Double(height) / Double(width)
+        guard stripAspect >= 1.8 else { return [] }
+
+        var columnOccupancy = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var nonWhite = 0
+            for y in 0..<height {
+                if luminances[y * width + x] < 0.985 {
+                    nonWhite += 1
+                }
+            }
+            columnOccupancy[x] = Double(nonWhite) / Double(height)
+        }
+
+        let smoothedColumns = movingAverage(columnOccupancy, window: max(3, width / 220))
+        let activeColumnIndexes = smoothedColumns.enumerated().compactMap { index, value in
+            value >= 0.18 ? index : nil
+        }
+        guard let firstColumn = activeColumnIndexes.first,
+              let lastColumn = activeColumnIndexes.last,
+              lastColumn > firstColumn else { return [] }
+
+        var xStart = firstColumn
+        var xEnd = min(width, lastColumn + 1)
+        while xStart + 1 < xEnd, smoothedColumns[xStart] < 0.32 { xStart += 1 }
+        while xStart + 1 < xEnd, smoothedColumns[xEnd - 1] < 0.32 { xEnd -= 1 }
+        let filmWidth = xEnd - xStart
+        guard filmWidth >= Int(Double(width) * 0.55),
+              filmWidth <= Int(Double(width) * 0.98) else { return [] }
+
+        var rowBody = [Double](repeating: 0, count: height)
+        var rowBlack = [Double](repeating: 0, count: height)
+        for y in 0..<height {
+            var body = 0
+            var black = 0
+            for x in xStart..<xEnd {
+                let value = luminances[y * width + x]
+                if value > 0.08 && value < 0.965 { body += 1 }
+                if value <= 0.08 { black += 1 }
+            }
+            rowBody[y] = Double(body) / Double(filmWidth)
+            rowBlack[y] = Double(black) / Double(filmWidth)
+        }
+
+        let smoothedRows = movingAverage(rowBody, window: max(3, height / 500))
+        let rowThreshold = max(0.16, min(0.34, median(smoothedRows) * 0.52 + standardDeviation(smoothedRows) * 0.10))
+        let minimumFrameHeight = max(80, Int(Double(filmWidth) * 0.52))
+        let maximumFrameHeight = max(minimumFrameHeight + 1, Int(Double(filmWidth) * 1.58))
+        let maxFrameGap = max(5, height / 220)
+        let frameRows = mergeCloseSegments(
+            thresholdSegments(
+                values: smoothedRows,
+                threshold: rowThreshold,
+                minimumSize: minimumFrameHeight,
+                lessThan: false
+            ),
+            maxGap: maxFrameGap
+        ).filter { segment in
+            segment.size >= minimumFrameHeight && segment.size <= maximumFrameHeight
+        }
+
+        guard frameRows.count >= 2 && frameRows.count <= 5 else { return [] }
+        let orderedRows = frameRows.sorted { $0.start < $1.start }
+        let heights = orderedRows.map { Double($0.size) }
+        let medianHeight = median(heights)
+        guard medianHeight > 0 else { return [] }
+        let consistentRows = orderedRows.filter { row in
+            let ratio = Double(row.size) / medianHeight
+            return ratio >= 0.72 && ratio <= 1.28
+        }
+        guard consistentRows.count == orderedRows.count else { return [] }
+
+        let blackGapRows = thresholdSegments(
+            values: movingAverage(rowBlack, window: max(3, height / 520)),
+            threshold: 0.62,
+            minimumSize: max(3, height / 380),
+            lessThan: false
+        )
+        let internalBlackGaps = blackGapRows.filter { gap in
+            gap.start > orderedRows.first!.end - maxFrameGap
+                && gap.end < orderedRows.last!.start + maxFrameGap
+        }
+        guard orderedRows.count < 3 || internalBlackGaps.count >= orderedRows.count - 2 else { return [] }
+
+        return orderedRows.compactMap { row in
+            let verticalPadding = max(2, min(row.size / 90, height / 900))
+            let top = min(row.end - 1, row.start + verticalPadding)
+            let bottom = max(top + 1, row.end - verticalPadding)
+            return refineNegativeFrameRect(
+                xStart: xStart,
+                xEnd: xEnd,
+                yStart: top,
+                yEnd: bottom,
+                luminances: luminances,
+                width: width,
+                height: height
+            )
+        }
     }
 
     private static func detectSingleFrameRect(luminances: [Double], width: Int, height: Int) -> CGRect? {
