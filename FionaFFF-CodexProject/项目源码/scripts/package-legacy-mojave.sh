@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXECUTABLE_NAME="fiona-spotter-tool"
-APP_VERSION="0.36.2"
-APP_BUILD="83"
+APP_VERSION="0.36.3"
+APP_BUILD="84"
 APP_DISPLAY_NAME="FionaFFF Test Mojave $APP_VERSION-$APP_BUILD"
-APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0362.b83"
+APP_BUNDLE_ID="local.fiona.fff.test.mojave.v0363.b84"
 RELEASE_BASE_NAME="FionaFFF-Test-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
@@ -266,7 +266,8 @@ for OLD_APP in \
   "/Applications/FionaFFF Test Mojave 0.35.8-79.app" \
   "/Applications/FionaFFF Test Mojave 0.35.9-80.app" \
   "/Applications/FionaFFF Test Mojave 0.36.0-81.app" \
-  "/Applications/FionaFFF Test Mojave 0.36.1-82.app"; do
+  "/Applications/FionaFFF Test Mojave 0.36.1-82.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.2-83.app"; do
   if [ -e "$OLD_APP" ] && [ "$OLD_APP" != "$TARGET_APP" ]; then
     echo "正在移除旧测试版：$OLD_APP"
     if ! rm -rf "$OLD_APP" 2>/dev/null; then
