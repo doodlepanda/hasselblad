@@ -496,8 +496,53 @@ final class LegacyWindowController: NSViewController {
 
     private func button(_ title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        prepareStableButton(button)
         return button
+    }
+
+    private func prepareStableButton(_ button: NSButton, role: String = "standard") {
+        button.identifier = NSUserInterfaceItemIdentifier("stableButton.\(role)")
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 5
+        button.layer?.borderWidth = 1
+        applyStableButtonColors(button)
+    }
+
+    private func applyStableButtonColors(_ button: NSButton) {
+        let isPrimary = button.identifier?.rawValue.hasSuffix(".primary") == true
+        let background: NSColor
+        let border: NSColor
+        let foreground: NSColor
+        if usesLightTheme {
+            background = isPrimary
+                ? NSColor(calibratedRed: 0.78, green: 0.86, blue: 0.96, alpha: 1)
+                : NSColor(calibratedWhite: 0.90, alpha: 1)
+            border = isPrimary
+                ? NSColor(calibratedRed: 0.38, green: 0.55, blue: 0.76, alpha: 1)
+                : NSColor(calibratedWhite: 0.68, alpha: 1)
+            foreground = NSColor(calibratedWhite: 0.12, alpha: 1)
+        } else {
+            background = isPrimary
+                ? NSColor(calibratedRed: 0.22, green: 0.31, blue: 0.43, alpha: 1)
+                : NSColor(calibratedWhite: 0.23, alpha: 1)
+            border = isPrimary
+                ? NSColor(calibratedRed: 0.39, green: 0.56, blue: 0.78, alpha: 1)
+                : NSColor(calibratedWhite: 0.34, alpha: 1)
+            foreground = NSColor(calibratedWhite: 0.94, alpha: 1)
+        }
+        button.layer?.backgroundColor = background.cgColor
+        button.layer?.borderColor = border.cgColor
+        button.contentTintColor = foreground
+        if !button.title.isEmpty {
+            button.attributedTitle = NSAttributedString(
+                string: button.title,
+                attributes: [
+                    .foregroundColor: foreground,
+                    .font: button.font ?? NSFont.systemFont(ofSize: 12)
+                ]
+            )
+        }
     }
 
     private func iconImage(_ name: String) -> NSImage? {
@@ -653,7 +698,7 @@ final class LegacyWindowController: NSViewController {
 
     private func imageButton(_ image: NSImage?, title: String = "", action: Selector, help: String) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .texturedRounded
+        prepareStableButton(button)
         button.image = image
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeft
         button.toolTip = help
@@ -673,7 +718,7 @@ final class LegacyWindowController: NSViewController {
 
     private func applyAllButton(title: String = "", compact: Bool = false) -> NSButton {
         let button = NSButton(title: title, target: self, action: #selector(applyCropsToCurrentTask))
-        button.bezelStyle = .texturedRounded
+        prepareStableButton(button)
         button.image = stackedRectanglesIcon()
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeft
         button.toolTip = "以左上第一帧黑边为基准，将当前红框应用到全部图片"
@@ -731,7 +776,7 @@ final class LegacyWindowController: NSViewController {
         fileActions.spacing = 6
 
         let identifyButton = NSButton(title: "自动识别", target: self, action: #selector(autoIdentify))
-        identifyButton.bezelStyle = .texturedRounded
+        prepareStableButton(identifyButton, role: "primary")
         identifyButton.image = magicWandIcon()
         identifyButton.imagePosition = .imageLeft
         identifyButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
@@ -1082,6 +1127,7 @@ final class LegacyWindowController: NSViewController {
             panel.layer?.borderColor = borderColor.cgColor
         }
         updateSectionTones(in: view)
+        updateStableButtonColors(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
     }
@@ -1094,6 +1140,16 @@ final class LegacyWindowController: NSViewController {
                 applySectionTone(subview, tone: tone)
             }
             updateSectionTones(in: subview)
+        }
+    }
+
+    private func updateStableButtonColors(in root: NSView) {
+        for subview in root.subviews {
+            if let button = subview as? NSButton,
+               button.identifier?.rawValue.hasPrefix("stableButton.") == true {
+                applyStableButtonColors(button)
+            }
+            updateStableButtonColors(in: subview)
         }
     }
 
@@ -1132,7 +1188,7 @@ final class LegacyWindowController: NSViewController {
 
     private func repeatingArrowButton(_ title: String, action: Selector, help: String) -> NSButton {
         let button = LegacyRepeatingButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        prepareStableButton(button)
         button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         button.toolTip = help
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -1875,8 +1931,8 @@ final class LegacyWindowController: NSViewController {
         dustStrengthLabel.stringValue = "强度 \(Int(dustRemovalStrength))"
     }
 
-    @objc private func zoomIn() { canvas.zoom *= 1.2 }
-    @objc private func zoomOut() { canvas.zoom = max(0.25, canvas.zoom / 1.2) }
+    @objc private func zoomIn() { canvas.adjustZoom(by: 1.2) }
+    @objc private func zoomOut() { canvas.adjustZoom(by: 1 / 1.2) }
     @objc private func resetZoom() { canvas.resetViewTransform() }
 
     private func refreshSummary() {
@@ -1969,6 +2025,9 @@ final class LegacyCanvasView: NSView {
     private var lastPanDisplayTime: TimeInterval = 0
     private var lastCropDisplayTime: TimeInterval = 0
     private var pendingCropDirtyRect = CGRect.null
+    private var interactionSnapshot: NSImage?
+    private var snapshotZoom: CGFloat = 1
+    private var snapshotPanOffset = CGPoint.zero
     private let usesMojaveRenderingPath: Bool = {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return version.majorVersion == 10 && version.minorVersion <= 14
@@ -2016,11 +2075,33 @@ final class LegacyCanvasView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         backgroundColor.setFill()
         dirtyRect.fill()
+        if usesMojaveRenderingPath,
+           let interactionSnapshot,
+           isWheelZooming || isPanning {
+            let scale = max(0.01, zoom / max(snapshotZoom, 0.01))
+            let center = CGPoint(
+                x: bounds.midX + snapshotPanOffset.x,
+                y: bounds.midY + snapshotPanOffset.y
+            )
+            let translatedCenter = CGPoint(
+                x: center.x + panOffset.x - snapshotPanOffset.x,
+                y: center.y + panOffset.y - snapshotPanOffset.y
+            )
+            let destination = CGRect(
+                x: translatedCenter.x - (center.x - bounds.minX) * scale,
+                y: translatedCenter.y - (center.y - bounds.minY) * scale,
+                width: bounds.width * scale,
+                height: bounds.height * scale
+            )
+            NSGraphicsContext.current?.imageInterpolation = .low
+            interactionSnapshot.draw(in: destination, from: .zero, operation: .copy, fraction: 1)
+            return
+        }
         guard let image else { return }
         let displayImage = isInverted ? (invertedImage ?? image) : image
-        let isInteracting = isWheelZooming || isPanning || activeIndex != nil
+        let usesFastInteractionPreview = isWheelZooming || isPanning
         let drawnImage: NSImage
-        if isInteracting {
+        if usesFastInteractionPreview {
             drawnImage = wheelPreview(for: displayImage, inverted: isInverted)
         } else if usesMojaveRenderingPath {
             drawnImage = settledPreview(for: displayImage, inverted: isInverted)
@@ -2028,7 +2109,7 @@ final class LegacyCanvasView: NSView {
             drawnImage = displayImage
         }
         let rect = imageContentRect()
-        NSGraphicsContext.current?.imageInterpolation = isInteracting ? .low : .high
+        NSGraphicsContext.current?.imageInterpolation = usesFastInteractionPreview ? .low : .high
         NSGraphicsContext.current?.saveGraphicsState()
         imageTransform(for: rect).concat()
         drawnImage.draw(in: rect)
@@ -2080,6 +2161,40 @@ final class LegacyCanvasView: NSView {
         return preview
     }
 
+    private func beginMojaveInteractionSnapshotIfNeeded() {
+        guard usesMojaveRenderingPath,
+              interactionSnapshot == nil,
+              bounds.width > 1,
+              bounds.height > 1 else { return }
+        let width = max(1, Int(bounds.width.rounded(.up)))
+        let height = max(1, Int(bounds.height.rounded(.up)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: false,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: width * 4,
+            bitsPerPixel: 32
+        ) else { return }
+        bitmap.size = bounds.size
+        cacheDisplay(in: bounds, to: bitmap)
+        let snapshot = NSImage(size: bounds.size)
+        snapshot.addRepresentation(bitmap)
+        interactionSnapshot = snapshot
+        snapshotZoom = zoom
+        snapshotPanOffset = panOffset
+    }
+
+    private func endMojaveInteractionSnapshot() {
+        interactionSnapshot = nil
+        snapshotZoom = zoom
+        snapshotPanOffset = panOffset
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let rawPoint = convert(event.locationInWindow, from: nil)
@@ -2100,6 +2215,7 @@ final class LegacyCanvasView: NSView {
         }
         selectedIndex = nil
         if image != nil, imageDisplayRect().contains(rawPoint) {
+            beginMojaveInteractionSnapshotIfNeeded()
             isPanning = true
             startPoint = rawPoint
             startPanOffset = panOffset
@@ -2168,6 +2284,7 @@ final class LegacyCanvasView: NSView {
         }
         lastMagnifierFrame = .null
         isPanning = false
+        endMojaveInteractionSnapshot()
         lastPanDisplayTime = 0
         lastCropDisplayTime = 0
         if !pendingCropDirtyRect.isNull {
@@ -2223,6 +2340,7 @@ final class LegacyCanvasView: NSView {
     override func scrollWheel(with event: NSEvent) {
         let delta = event.scrollingDeltaY == 0 ? event.scrollingDeltaX : event.scrollingDeltaY
         guard delta != 0 else { return }
+        beginMojaveInteractionSnapshotIfNeeded()
         isWheelZooming = true
         let factor = pow(CGFloat(1.0018), delta)
         suppressZoomRedraw = true
@@ -2239,11 +2357,25 @@ final class LegacyCanvasView: NSView {
 
     @objc private func finishWheelZoom() {
         isWheelZooming = false
+        endMojaveInteractionSnapshot()
         lastWheelZoomDisplayTime = 0
         needsDisplay = true
     }
 
+    func adjustZoom(by factor: CGFloat) {
+        guard factor > 0 else { return }
+        beginMojaveInteractionSnapshotIfNeeded()
+        isWheelZooming = true
+        suppressZoomRedraw = true
+        zoom = min(8, max(0.25, zoom * factor))
+        suppressZoomRedraw = false
+        needsDisplay = true
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(finishWheelZoom), object: nil)
+        perform(#selector(finishWheelZoom), with: nil, afterDelay: 0.10)
+    }
+
     func resetViewTransform() {
+        endMojaveInteractionSnapshot()
         zoom = 1
         panOffset = .zero
         needsDisplay = true
