@@ -16,6 +16,9 @@ struct LegacyCrop: Equatable {
 struct LegacyImageAdjustments: Equatable {
     var levelsEnabled = false
     var curvesEnabled = false
+    var redGain: Double = 1
+    var greenGain: Double = 1
+    var blueGain: Double = 1
     var inputBlack: Double = 0
     var inputWhite: Double = 1
     var gamma: Double = 1
@@ -25,7 +28,12 @@ struct LegacyImageAdjustments: Equatable {
     var curveMidtones: Double = 0
     var curveHighlights: Double = 0
 
-    var isActive: Bool { levelsEnabled || curvesEnabled }
+    var isActive: Bool {
+        levelsEnabled || curvesEnabled ||
+            abs(redGain - 1) > 0.0001 ||
+            abs(greenGain - 1) > 0.0001 ||
+            abs(blueGain - 1) > 0.0001
+    }
 }
 
 struct LegacyPhoto {
@@ -286,6 +294,39 @@ final class LegacyFilmstripTileView: NSView {
     }
 }
 
+final class LegacyFlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
+final class LegacyTaskRowView: NSView {
+    var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+    var isStopped = false {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let color: NSColor
+        if isSelected {
+            color = NSColor(calibratedRed: 0.24, green: 0.29, blue: 0.37, alpha: 1)
+        } else if isStopped {
+            color = NSColor(calibratedRed: 0.18, green: 0.16, blue: 0.17, alpha: 1)
+        } else {
+            color = NSColor(calibratedWhite: 0.18, alpha: 1)
+        }
+        color.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 4, yRadius: 4).fill()
+        let border = isSelected
+            ? NSColor(calibratedRed: 0.42, green: 0.60, blue: 0.88, alpha: 1)
+            : NSColor.white.withAlphaComponent(0.08)
+        border.setStroke()
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5), xRadius: 4, yRadius: 4)
+        path.lineWidth = isSelected ? 1.5 : 1
+        path.stroke()
+    }
+}
+
 final class LegacyWindowController: NSViewController {
     private enum DetectionSizingMode: Int {
         case fixedFirstManual
@@ -298,9 +339,10 @@ final class LegacyWindowController: NSViewController {
     private let outputLabel = NSTextField(labelWithString: "默认导出到原文件夹")
     private let cropCountLabel = NSTextField(labelWithString: "红框 0 个")
     private let detectionReportLabel = NSTextField(labelWithString: "算法候选：等待识别")
-    private let algorithmPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let algorithmListStack = NSStackView()
     private let detectionModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let taskPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let taskListScroll = NSScrollView()
+    private let taskListStack = LegacyFlippedStackView()
     private let photoPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let fffParsingCheckbox = NSButton(checkboxWithTitle: "解析 FFF/3F 文件", target: nil, action: nil)
@@ -309,11 +351,17 @@ final class LegacyWindowController: NSViewController {
     private let dustStrengthLabel = NSTextField(labelWithString: "强度 35")
     private let filmstripScroll = NSScrollView()
     private let filmstripStack = NSStackView()
-    private let thumbnailQueue = DispatchQueue(label: "fiona.spotter.legacy.thumbnails", qos: .userInitiated)
-    private var thumbnailCache: [String: NSImage] = [:]
+    private let previewCache = NSCache<NSString, NSImage>()
+    private let previewQueue = DispatchQueue(label: "fiona.spotter.legacy.preview", qos: .userInitiated)
     private var tasks: [LegacyTask] = []
     private var selectedTaskIndex = 0
     private var selectedPhotoIndex = 0
+    private var selectedTaskIndexes: Set<Int> = []
+    private var lastTaskSelectionIndex: Int?
+    private var filmstripPhotoRefs: [(taskIndex: Int, photoIndex: Int)] = []
+    private var previewLoadGeneration = 0
+    private var pendingFilmstripRefresh: DispatchWorkItem?
+    private var fileTypeIconCache: [String: NSImage] = [:]
     private var exportDirectory: URL?
     private var templateRect: CGRect?
     private var templateImageAspect: Double?
@@ -322,12 +370,14 @@ final class LegacyWindowController: NSViewController {
     private var dustRemovalStrength = 35.0
     private var imageAspectCache: [String: Double] = [:]
     private var detectionCandidatesByPhotoPath: [String: [LegacyDetectionCandidate]] = [:]
+    private var selectedAlgorithmIndexByPhotoPath: [String: Int] = [:]
     private var detectionSizingMode: DetectionSizingMode = .fixedFirstManual
     private var usesLightTheme = false
     private weak var topBarView: NSView?
     private weak var leftPanelView: NSView?
     private weak var rightPanelView: NSView?
     private weak var bottomPanelView: NSView?
+    private var arrowKeyMonitor: Any?
 
     private var selectedTask: LegacyTask? {
         tasks.indices.contains(selectedTaskIndex) ? tasks[selectedTaskIndex] : nil
@@ -345,6 +395,7 @@ final class LegacyWindowController: NSViewController {
 
     override func loadView() {
         LegacyLaunchLog.write("loadView")
+        previewCache.countLimit = 8
         let rootView = LegacyDropRootView(frame: NSRect(x: 0, y: 0, width: 1280, height: 760))
         rootView.onFileDropped = { [weak self] urls in
             self?.importItems(urls)
@@ -365,25 +416,20 @@ final class LegacyWindowController: NSViewController {
         formatPopup.addItems(withTitles: ["TIF 16-bit", "JPG"])
         formatPopup.target = self
         formatPopup.action = #selector(formatChanged)
-        fffParsingCheckbox.state = .on
+        fffParsingCheckbox.state = .off
         fffParsingCheckbox.target = self
         fffParsingCheckbox.action = #selector(fffParsingChanged)
-        FFFParsingRuntime.isEnabled = true
+        FFFParsingRuntime.isEnabled = false
         dustRemovalCheckbox.target = self
         dustRemovalCheckbox.action = #selector(dustRemovalChanged)
         dustStrengthSlider.target = self
         dustStrengthSlider.action = #selector(dustStrengthChanged)
-        taskPopup.target = self
-        taskPopup.action = #selector(taskSelectionChanged)
         photoPopup.target = self
         photoPopup.action = #selector(photoSelectionChanged)
-        algorithmPopup.target = self
-        algorithmPopup.action = #selector(algorithmSelectionChanged)
-        detectionModePopup.addItems(withTitles: ["固定第一手动框大小", "自动适应画面边界"])
+        detectionModePopup.addItems(withTitles: ["135画幅", "120画幅"])
         detectionModePopup.selectItem(at: DetectionSizingMode.fixedFirstManual.rawValue)
         detectionModePopup.target = self
         detectionModePopup.action = #selector(detectionModeChanged)
-
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.wantsLayer = true
         canvas.layer?.cornerRadius = 8
@@ -401,6 +447,9 @@ final class LegacyWindowController: NSViewController {
         }
         canvas.onMagnifierToggled = { [weak self] enabled in
             self?.statusLabel.stringValue = enabled ? "已开启拖动放大镜。" : "已关闭拖动放大镜。"
+        }
+        canvas.onNudgeAll = { [weak self] dx, dy in
+            self?.nudgeAllCrops(dx: dx, dy: dy)
         }
         canvas.onFileDropped = { [weak self] urls in
             self?.importItems(urls)
@@ -436,16 +485,93 @@ final class LegacyWindowController: NSViewController {
             bottomPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             bottomPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
             bottomPanel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
-            bottomPanel.heightAnchor.constraint(equalToConstant: 170)
+            bottomPanel.heightAnchor.constraint(equalToConstant: 112)
         ])
         applyTheme()
         LegacyLaunchLog.write("loadView finished")
     }
 
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        guard arrowKeyMonitor == nil else { return }
+        arrowKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  event.window === self.view.window,
+                  event.modifierFlags.intersection([.control, .option]).isEmpty else {
+                return event
+            }
+            let moveAll = event.modifierFlags.contains(.command)
+            switch event.keyCode {
+            case 123:
+                moveAll ? self.nudgeAllCrops(dx: -0.001, dy: 0) : self.nudgeSelectedCrop(dx: -0.001, dy: 0)
+            case 124:
+                moveAll ? self.nudgeAllCrops(dx: 0.001, dy: 0) : self.nudgeSelectedCrop(dx: 0.001, dy: 0)
+            case 125:
+                moveAll ? self.nudgeAllCrops(dx: 0, dy: -0.001) : self.nudgeSelectedCrop(dx: 0, dy: -0.001)
+            case 126:
+                moveAll ? self.nudgeAllCrops(dx: 0, dy: 0.001) : self.nudgeSelectedCrop(dx: 0, dy: 0.001)
+            default:
+                return event
+            }
+            return nil
+        }
+    }
+
+    deinit {
+        if let arrowKeyMonitor {
+            NSEvent.removeMonitor(arrowKeyMonitor)
+        }
+    }
+
     private func button(_ title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        prepareStableButton(button)
         return button
+    }
+
+    private func prepareStableButton(_ button: NSButton, role: String = "standard") {
+        button.identifier = NSUserInterfaceItemIdentifier("stableButton.\(role)")
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 5
+        button.layer?.borderWidth = 1
+        applyStableButtonColors(button)
+    }
+
+    private func applyStableButtonColors(_ button: NSButton) {
+        let isPrimary = button.identifier?.rawValue.hasSuffix(".primary") == true
+        let background: NSColor
+        let border: NSColor
+        let foreground: NSColor
+        if usesLightTheme {
+            background = isPrimary
+                ? NSColor(calibratedRed: 0.78, green: 0.86, blue: 0.96, alpha: 1)
+                : NSColor(calibratedWhite: 0.90, alpha: 1)
+            border = isPrimary
+                ? NSColor(calibratedRed: 0.38, green: 0.55, blue: 0.76, alpha: 1)
+                : NSColor(calibratedWhite: 0.68, alpha: 1)
+            foreground = NSColor(calibratedWhite: 0.12, alpha: 1)
+        } else {
+            background = isPrimary
+                ? NSColor(calibratedRed: 0.22, green: 0.31, blue: 0.43, alpha: 1)
+                : NSColor(calibratedWhite: 0.23, alpha: 1)
+            border = isPrimary
+                ? NSColor(calibratedRed: 0.39, green: 0.56, blue: 0.78, alpha: 1)
+                : NSColor(calibratedWhite: 0.34, alpha: 1)
+            foreground = NSColor(calibratedWhite: 0.94, alpha: 1)
+        }
+        button.layer?.backgroundColor = background.cgColor
+        button.layer?.borderColor = border.cgColor
+        button.contentTintColor = foreground
+        if !button.title.isEmpty {
+            button.attributedTitle = NSAttributedString(
+                string: button.title,
+                attributes: [
+                    .foregroundColor: foreground,
+                    .font: button.font ?? NSFont.systemFont(ofSize: 12)
+                ]
+            )
+        }
     }
 
     private func iconImage(_ name: String) -> NSImage? {
@@ -561,6 +687,40 @@ final class LegacyWindowController: NSViewController {
         return image
     }
 
+    private func exportPathListIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+        for y in [15.5, 10.8, 6.1] as [CGFloat] {
+            NSBezierPath(ovalIn: NSRect(x: 4, y: y - 1.2, width: 2.4, height: 2.4)).fill()
+            let line = NSBezierPath()
+            line.lineWidth = 1.7
+            line.lineCapStyle = .round
+            line.move(to: NSPoint(x: 9, y: y))
+            line.line(to: NSPoint(x: 18, y: y))
+            line.stroke()
+        }
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    private func minusCropIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        let line = NSBezierPath()
+        line.lineWidth = 2.4
+        line.lineCapStyle = .round
+        line.move(to: NSPoint(x: 6, y: 11))
+        line.line(to: NSPoint(x: 16, y: 11))
+        line.stroke()
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
     private func loupeIcon() -> NSImage {
         let image = NSImage(size: NSSize(width: 22, height: 22))
         image.lockFocus()
@@ -595,13 +755,34 @@ final class LegacyWindowController: NSViewController {
         return image
     }
 
+    private func autoToneIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 22, height: 22))
+        image.lockFocus()
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+        let bars: [(CGFloat, CGFloat)] = [(4, 5), (8, 9), (12, 13), (16, 8)]
+        for (x, height) in bars {
+            NSBezierPath(rect: NSRect(x: x, y: 4, width: 2.2, height: height)).fill()
+        }
+        let sparkle = NSBezierPath()
+        sparkle.lineWidth = 1.4
+        sparkle.move(to: NSPoint(x: 17, y: 14))
+        sparkle.line(to: NSPoint(x: 17, y: 21))
+        sparkle.move(to: NSPoint(x: 13.5, y: 17.5))
+        sparkle.line(to: NSPoint(x: 20.5, y: 17.5))
+        sparkle.stroke()
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
     private func iconButton(_ iconName: String, title: String = "", action: Selector, help: String) -> NSButton {
         imageButton(iconImage(iconName), title: title, action: action, help: help)
     }
 
     private func imageButton(_ image: NSImage?, title: String = "", action: Selector, help: String) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .texturedRounded
+        prepareStableButton(button)
         button.image = image
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeft
         button.toolTip = help
@@ -616,13 +797,12 @@ final class LegacyWindowController: NSViewController {
     private func iconWideButton(_ title: String, iconName: String, action: Selector, help: String) -> NSButton {
         let button = iconButton(iconName, title: title, action: action, help: help)
         button.alignment = .center
-        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
         return button
     }
 
     private func applyAllButton(title: String = "", compact: Bool = false) -> NSButton {
         let button = NSButton(title: title, target: self, action: #selector(applyCropsToCurrentTask))
-        button.bezelStyle = .texturedRounded
+        prepareStableButton(button)
         button.image = stackedRectanglesIcon()
         button.imagePosition = title.isEmpty ? .imageOnly : .imageLeft
         button.toolTip = "以左上第一帧黑边为基准，将当前红框应用到全部图片"
@@ -642,13 +822,13 @@ final class LegacyWindowController: NSViewController {
         bar.layer?.backgroundColor = NSColor(calibratedRed: 0.13, green: 0.13, blue: 0.14, alpha: 1).cgColor
 
         let title = label("FionaFFF", size: 15, weight: .semibold, color: NSColor(calibratedWhite: 0.92, alpha: 1))
-        let subtitle = label("Mojave build 0.35.2-64", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
+        let subtitle = label("Mojave build 0.35.2-73", size: 10, weight: .regular, color: NSColor(calibratedWhite: 0.62, alpha: 1))
         let stack = NSStackView(views: [title, subtitle])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let importButton = imageButton(importIcon(), title: "导入文件", action: #selector(importFile), help: "导入图片文件或文件夹")
+        let importButton = imageButton(exportPathListIcon(), title: "选择导出路径", action: #selector(chooseOutput), help: "选择导出文件夹")
         let exportButton = iconWideButton("导出", iconName: "NSShareTemplate", action: #selector(exportCrops), help: "按当前红框导出")
         let actions = NSStackView(views: [importButton, exportButton])
         actions.orientation = .horizontal
@@ -672,70 +852,113 @@ final class LegacyWindowController: NSViewController {
 
     private func makeLeftPanel() -> NSView {
         let box = panel()
-        let title = label("任务列表", size: 13, weight: .semibold)
-        let clearButton = iconButton("NSEraserTemplate", action: #selector(deleteSelectedTask), help: "删除当前任务")
-        let titleRow = NSStackView(views: [title, clearButton])
-        titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.spacing = 8
         let importButton = imageButton(importIcon(), action: #selector(importFile), help: "导入图片文件或文件夹")
         let openFolderButton = imageButton(revealIcon(), action: #selector(openCurrentImageFolder), help: "打开当前图片所在文件夹")
-        let stopButton = iconButton("NSStopProgressTemplate", action: #selector(stopSelectedTask), help: "终止当前任务")
-        let deleteButton = iconButton("NSTrashFull", action: #selector(deleteSelectedTask), help: "删除当前任务")
+        let fileActions = NSStackView(views: [importButton, openFolderButton])
+        fileActions.orientation = .horizontal
+        fileActions.alignment = .centerY
+        fileActions.spacing = 6
+
+        let identifyButton = NSButton(title: "自动识别", target: self, action: #selector(autoIdentify))
+        prepareStableButton(identifyButton, role: "primary")
+        identifyButton.image = magicWandIcon()
+        identifyButton.imagePosition = .imageLeft
+        identifyButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        identifyButton.toolTip = "自动识别当前任务画面"
+        identifyButton.translatesAutoresizingMaskIntoConstraints = false
+        identifyButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        detectionModePopup.translatesAutoresizingMaskIntoConstraints = false
+        detectionModePopup.toolTip = "选择按第一手动框固定大小，或让每个选框自动适应画面边界"
         let applyButton = applyAllButton()
         let rotateLeftButton = arrowButton("↶", action: #selector(rotateSelectedCropLeft), help: "当前选中红框向左旋转 0.5 度")
         let rotateRightButton = arrowButton("↷", action: #selector(rotateSelectedCropRight), help: "当前选中红框向右旋转 0.5 度")
         let rotateImageLeftButton = arrowButton("⟲", action: #selector(rotateImageLeft), help: "整张图片向左旋转 90 度，导出方向与预览一致")
         let rotateImageRightButton = arrowButton("⟳", action: #selector(rotateImageRight), help: "整张图片向右旋转 90 度，导出方向与预览一致")
+        let zoomOutButton = iconButton("NSExitFullScreenTemplate", action: #selector(zoomOut), help: "缩小预览")
+        let resetZoomButton = smallButton("100%", action: #selector(resetZoom))
+        resetZoomButton.toolTip = "恢复 100% 预览"
+        let zoomInButton = iconButton("NSEnterFullScreenTemplate", action: #selector(zoomIn), help: "放大预览")
         let invertButton = imageButton(invertIcon(), action: #selector(toggleInvertImage), help: "一键反相当前图片，导出保持反相效果")
+        let autoToneButton = imageButton(autoToneIcon(), action: #selector(autoToneAndColor), help: "一键自动色调、自动对比度和自动颜色，建议在反相后使用")
         let loupeButton = imageButton(loupeIcon(), action: #selector(toggleMagnifier), help: "开启或关闭拖动红框时的放大镜，快捷键 D")
-        let taskActions = NSStackView(views: [applyButton, openFolderButton, stopButton, deleteButton])
-        taskActions.orientation = .horizontal
-        taskActions.alignment = .centerY
-        taskActions.spacing = 6
-        let rotateActions = NSStackView(views: [rotateLeftButton, rotateRightButton])
+
+        let rotateActions = NSStackView(views: [
+            rotateImageLeftButton,
+            rotateImageRightButton,
+            rotateLeftButton,
+            rotateRightButton
+        ])
         rotateActions.orientation = .horizontal
         rotateActions.alignment = .centerY
         rotateActions.spacing = 6
-        let imageRotateActions = NSStackView(views: [rotateImageLeftButton, rotateImageRightButton, invertButton, loupeButton])
-        imageRotateActions.orientation = .horizontal
-        imageRotateActions.alignment = .centerY
-        imageRotateActions.spacing = 6
-        taskPopup.translatesAutoresizingMaskIntoConstraints = false
-        photoPopup.translatesAutoresizingMaskIntoConstraints = false
-        fileNameLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        fileNameLabel.textColor = NSColor(calibratedWhite: 0.9, alpha: 1)
-        fileNameLabel.lineBreakMode = .byTruncatingMiddle
-        let hint = label("拖入文件夹或图片；红框作为识别参考。", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
-        hint.lineBreakMode = .byWordWrapping
-        hint.maximumNumberOfLines = 4
-        let stack = NSStackView(views: [
-            titleRow,
-            separator(),
-            taskPopup,
-            fileNameLabel,
-            taskActions,
-            imageRotateActions,
+        let zoomActions = NSStackView(views: [zoomOutButton, resetZoomButton, zoomInButton])
+        zoomActions.orientation = .horizontal
+        zoomActions.alignment = .centerY
+        zoomActions.spacing = 6
+        let viewActions = NSStackView(views: [applyButton, loupeButton, invertButton, autoToneButton])
+        viewActions.orientation = .horizontal
+        viewActions.alignment = .centerY
+        viewActions.spacing = 6
+
+        let fileSection = sectionCard(title: "文件操作", views: [fileActions], tone: 0)
+        let toolsContent = NSStackView(views: [
+            detectionModePopup,
+            identifyButton,
             rotateActions,
-            hint,
-            importButton
+            zoomActions,
+            viewActions
         ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        box.addSubview(stack)
+        toolsContent.orientation = .vertical
+        toolsContent.alignment = .leading
+        toolsContent.spacing = 8
+        let toolsSection = sectionCard(title: "画面与选框", views: [toolsContent], tone: 1)
+
+        let title = label("任务列表", size: 13, weight: .semibold)
+        let taskCount = label("0", size: 10, weight: .medium, color: NSColor(calibratedWhite: 0.62, alpha: 1))
+        taskCount.identifier = NSUserInterfaceItemIdentifier("taskCountLabel")
+        let titleRow = NSStackView(views: [title, taskCount])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.distribution = .fill
+        titleRow.spacing = 8
+
+        taskListStack.orientation = .vertical
+        taskListStack.alignment = .leading
+        taskListStack.spacing = 6
+        taskListStack.translatesAutoresizingMaskIntoConstraints = false
+        taskListScroll.documentView = taskListStack
+        taskListScroll.hasVerticalScroller = true
+        taskListScroll.hasHorizontalScroller = false
+        taskListScroll.autohidesScrollers = true
+        taskListScroll.drawsBackground = false
+        taskListScroll.translatesAutoresizingMaskIntoConstraints = false
+        let taskSection = sectionCard(title: "", views: [titleRow, taskListScroll], tone: 2)
+
+        for item in [fileSection, toolsSection, taskSection] {
+            item.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(item)
+        }
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 16),
-            taskPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            titleRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            taskActions.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            imageRotateActions.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            rotateActions.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            importButton.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor)
+            fileSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            fileSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            fileSection.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
+
+            toolsSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            toolsSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            toolsSection.topAnchor.constraint(equalTo: fileSection.bottomAnchor, constant: 8),
+            detectionModePopup.widthAnchor.constraint(equalTo: toolsSection.widthAnchor, constant: -16),
+            identifyButton.widthAnchor.constraint(equalTo: toolsSection.widthAnchor, constant: -16),
+
+            taskSection.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            taskSection.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
+            taskSection.topAnchor.constraint(equalTo: toolsSection.bottomAnchor, constant: 8),
+            taskSection.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            taskListScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            taskListStack.widthAnchor.constraint(equalTo: taskListScroll.contentView.widthAnchor),
+            titleRow.widthAnchor.constraint(equalTo: taskSection.widthAnchor, constant: -16),
+            taskListScroll.widthAnchor.constraint(equalTo: taskSection.widthAnchor, constant: -16)
         ])
+        rebuildTaskList()
         return box
     }
 
@@ -743,10 +966,9 @@ final class LegacyWindowController: NSViewController {
         let box = panel()
         let title = label("参数设置", size: 15, weight: .bold)
         let add = iconButton("NSAddTemplate", action: #selector(addBox), help: "新增红框")
-        let identify = imageButton(magicWandIcon(), action: #selector(autoIdentify), help: "自动识别")
-        let apply = applyAllButton(compact: true)
-        let clearCrops = iconButton("NSTrashFull", action: #selector(clearCurrentCrops), help: "清除当前图片所有红框")
-        let toolRow = NSStackView(views: [add, identify, apply, clearCrops])
+        let deleteCrop = imageButton(minusCropIcon(), action: #selector(deleteCurrentCrop), help: "删除当前选中的红框")
+        let clearAllCrops = iconButton("NSTrashFull", action: #selector(clearCurrentCrops), help: "删除当前预览图所有选框")
+        let toolRow = NSStackView(views: [add, deleteCrop, clearAllCrops])
         toolRow.orientation = .horizontal
         toolRow.alignment = .centerY
         toolRow.spacing = 9
@@ -758,22 +980,13 @@ final class LegacyWindowController: NSViewController {
         nudgeRow.orientation = .horizontal
         nudgeRow.alignment = .centerY
         nudgeRow.spacing = 6
-        let choose = imageButton(outputFolderIcon(), action: #selector(chooseOutput), help: "选择导出文件夹")
-        let export = iconButton("NSShareTemplate", action: #selector(exportCrops), help: "导出当前任务")
-        let exportRow = NSStackView(views: [choose, export])
-        exportRow.orientation = .horizontal
-        exportRow.alignment = .centerY
-        exportRow.spacing = 6
-        let zoomRow = NSStackView(views: [
-            iconButton("NSExitFullScreenTemplate", action: #selector(zoomOut), help: "缩小预览"),
-            smallButton("100%", action: #selector(resetZoom)),
-            iconButton("NSEnterFullScreenTemplate", action: #selector(zoomIn), help: "放大预览")
-        ])
-        zoomRow.orientation = .horizontal
-        zoomRow.spacing = 6
         formatPopup.translatesAutoresizingMaskIntoConstraints = false
-        algorithmPopup.translatesAutoresizingMaskIntoConstraints = false
-        detectionModePopup.translatesAutoresizingMaskIntoConstraints = false
+        algorithmListStack.orientation = .vertical
+        algorithmListStack.alignment = .leading
+        algorithmListStack.spacing = 5
+        algorithmListStack.translatesAutoresizingMaskIntoConstraints = false
+        algorithmListStack.setHuggingPriority(.required, for: .vertical)
+        algorithmListStack.setContentCompressionResistancePriority(.required, for: .vertical)
         fffParsingCheckbox.font = NSFont.systemFont(ofSize: 12)
         fffParsingCheckbox.contentTintColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         dustRemovalCheckbox.font = NSFont.systemFont(ofSize: 12)
@@ -792,52 +1005,135 @@ final class LegacyWindowController: NSViewController {
         detectionReportLabel.font = NSFont(name: "Menlo", size: 10) ?? NSFont.systemFont(ofSize: 10)
         detectionReportLabel.maximumNumberOfLines = 6
         detectionReportLabel.lineBreakMode = .byWordWrapping
-        let shortcutLabel = label("快捷键：A 新增红框 · S/Delete 删除当前红框 · D 放大镜 · 鼠标滚轮缩放", size: 10, color: NSColor(calibratedWhite: 0.58, alpha: 1))
-        shortcutLabel.maximumNumberOfLines = 4
+        let shortcutLabel = label(
+            "快捷键\n" +
+            "A：新增选框\n" +
+            "S / Delete：删除当前选框\n" +
+            "方向键：移动选中框\n" +
+            "Command＋方向键：移动全部选框\n" +
+            "D：开关放大镜\n" +
+            "鼠标滚轮：缩放画布\n" +
+            "Command / Shift＋点击：多选任务",
+            size: 9,
+            color: NSColor(calibratedWhite: 0.58, alpha: 1)
+        )
+        shortcutLabel.maximumNumberOfLines = 8
         shortcutLabel.lineBreakMode = .byWordWrapping
+
+        let cropSection = sectionCard(
+            title: "裁切框",
+            views: [toolRow],
+            tone: 0
+        )
+        let nudgeSection = sectionCard(
+            title: "统一微调",
+            views: [nudgeRow],
+            tone: 1
+        )
+        let algorithmSection = sectionCard(
+            title: "算法结果",
+            views: [algorithmListStack],
+            tone: 2
+        )
+        let exportSection = sectionCard(
+            title: "导出设置",
+            views: [
+                fffParsingCheckbox,
+                formatPopup,
+                dustRow,
+                dustStrengthSlider,
+                outputLabel
+            ],
+            tone: 1
+        )
+
         let stack = NSStackView(views: [
             title,
             separator(),
-            label("裁切框", size: 12, weight: .semibold),
-            label("识别模式", size: 11, weight: .semibold),
-            detectionModePopup,
-            toolRow,
-            label("统一微调", size: 12, weight: .semibold),
-            nudgeRow,
-            label("预览缩放", size: 12, weight: .semibold),
-            zoomRow,
-            label("算法结果", size: 12, weight: .semibold),
-            algorithmPopup,
-            label("导出格式", size: 12, weight: .semibold),
-            fffParsingCheckbox,
-            formatPopup,
-            dustRow,
-            dustStrengthSlider,
-            exportRow,
-            outputLabel,
-            separator(),
-            detectionReportLabel,
-            separator(),
+            cropSection,
+            nudgeSection,
+            algorithmSection,
+            exportSection,
             shortcutLabel,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
+        stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
         box.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
             stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
             stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
-            detectionModePopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            algorithmPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            formatPopup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            dustStrengthSlider.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            exportRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            detectionReportLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: box.bottomAnchor, constant: -8),
+            cropSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            nudgeSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            exportSection.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            algorithmListStack.widthAnchor.constraint(equalTo: algorithmSection.widthAnchor, constant: -16),
+            algorithmListStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 130),
+            formatPopup.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
+            dustStrengthSlider.widthAnchor.constraint(equalTo: exportSection.widthAnchor, constant: -16),
             shortcutLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         return box
+    }
+
+    private func sectionCard(title: String, views: [NSView], tone: Int) -> NSView {
+        let card = NSView()
+        card.identifier = NSUserInterfaceItemIdentifier("sectionTone\(tone)")
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 5
+        card.layer?.borderWidth = 1
+
+        let content = NSStackView(views: views)
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(content)
+        if title.isEmpty {
+            NSLayoutConstraint.activate([
+                content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+                content.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+                content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            ])
+        } else {
+            let heading = label(title, size: 11, weight: .semibold)
+            card.addSubview(heading)
+            NSLayoutConstraint.activate([
+                heading.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -8),
+                heading.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
+                content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+                content.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 6),
+                content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            ])
+        }
+        applySectionTone(card, tone: tone)
+        return card
+    }
+
+    private func applySectionTone(_ view: NSView, tone: Int) {
+        let darkColors = [
+            NSColor(calibratedWhite: 0.115, alpha: 0.72),
+            NSColor(calibratedWhite: 0.185, alpha: 0.72),
+            NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.21, alpha: 0.82)
+        ]
+        let lightColors = [
+            NSColor(calibratedWhite: 0.91, alpha: 1),
+            NSColor(calibratedWhite: 0.965, alpha: 1),
+            NSColor(calibratedRed: 0.88, green: 0.92, blue: 0.97, alpha: 1)
+        ]
+        let colors = usesLightTheme ? lightColors : darkColors
+        view.layer?.backgroundColor = colors[min(max(tone, 0), colors.count - 1)].cgColor
+        view.layer?.borderColor = (usesLightTheme
+            ? NSColor.black.withAlphaComponent(0.12)
+            : NSColor.white.withAlphaComponent(0.09)).cgColor
     }
 
     private func makeBottomPanel() -> NSView {
@@ -878,7 +1174,7 @@ final class LegacyWindowController: NSViewController {
             stack.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
             filmstripScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            filmstripScroll.heightAnchor.constraint(equalToConstant: 132)
+            filmstripScroll.heightAnchor.constraint(equalToConstant: 54)
         ])
         return box
     }
@@ -923,8 +1219,32 @@ final class LegacyWindowController: NSViewController {
             panel.layer?.backgroundColor = panelColor.cgColor
             panel.layer?.borderColor = borderColor.cgColor
         }
+        updateSectionTones(in: view)
+        updateStableButtonColors(in: view)
         canvas.backgroundColor = usesLightTheme ? NSColor(calibratedWhite: 0.78, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         setTextColors(in: view, textColor: textColor, mutedColor: mutedColor)
+        updateControlTextColors(in: view, textColor: textColor)
+    }
+
+    private func updateSectionTones(in root: NSView) {
+        for subview in root.subviews {
+            if let raw = subview.identifier?.rawValue,
+               raw.hasPrefix("sectionTone"),
+               let tone = Int(raw.dropFirst("sectionTone".count)) {
+                applySectionTone(subview, tone: tone)
+            }
+            updateSectionTones(in: subview)
+        }
+    }
+
+    private func updateStableButtonColors(in root: NSView) {
+        for subview in root.subviews {
+            if let button = subview as? NSButton,
+               button.identifier?.rawValue.hasPrefix("stableButton.") == true {
+                applyStableButtonColors(button)
+            }
+            updateStableButtonColors(in: subview)
+        }
     }
 
     private func setTextColors(in root: NSView, textColor: NSColor, mutedColor: NSColor) {
@@ -934,6 +1254,51 @@ final class LegacyWindowController: NSViewController {
             }
             setTextColors(in: subview, textColor: textColor, mutedColor: mutedColor)
         }
+    }
+
+    private func updateControlTextColors(in root: NSView, textColor: NSColor) {
+        for subview in root.subviews {
+            if let popup = subview as? NSPopUpButton {
+                let popupTextColor = NSColor.black
+                popup.contentTintColor = popupTextColor
+                let font = popup.font ?? NSFont.systemFont(ofSize: 12)
+                for item in popup.itemArray {
+                    item.attributedTitle = NSAttributedString(
+                        string: item.title,
+                        attributes: [.foregroundColor: popupTextColor, .font: font]
+                    )
+                }
+                if let title = popup.selectedItem?.title {
+                    popup.attributedTitle = NSAttributedString(
+                        string: title,
+                        attributes: [.foregroundColor: popupTextColor, .font: font]
+                    )
+                }
+            } else if let button = subview as? NSButton,
+                      button.identifier?.rawValue.hasPrefix("stableButton.") != true,
+                      !button.title.isEmpty {
+                button.contentTintColor = textColor
+                button.attributedTitle = NSAttributedString(
+                    string: button.title,
+                    attributes: [
+                        .foregroundColor: textColor,
+                        .font: button.font ?? NSFont.systemFont(ofSize: 12)
+                    ]
+                )
+            }
+            updateControlTextColors(in: subview, textColor: textColor)
+        }
+    }
+
+    private func refreshThemeText(in root: NSView) {
+        let textColor = usesLightTheme
+            ? NSColor(calibratedWhite: 0.12, alpha: 1)
+            : NSColor(calibratedWhite: 0.88, alpha: 1)
+        let mutedColor = usesLightTheme
+            ? NSColor(calibratedWhite: 0.36, alpha: 1)
+            : NSColor(calibratedWhite: 0.62, alpha: 1)
+        setTextColors(in: root, textColor: textColor, mutedColor: mutedColor)
+        updateControlTextColors(in: root, textColor: textColor)
     }
 
     private func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = NSColor(calibratedWhite: 0.88, alpha: 1)) -> NSTextField {
@@ -962,7 +1327,7 @@ final class LegacyWindowController: NSViewController {
 
     private func repeatingArrowButton(_ title: String, action: Selector, help: String) -> NSButton {
         let button = LegacyRepeatingButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        prepareStableButton(button)
         button.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         button.toolTip = help
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -1000,38 +1365,103 @@ final class LegacyWindowController: NSViewController {
     private func importItems(_ urls: [URL]) {
         let includeFFFParsing = fffParsingCheckbox.state == .on
         FFFParsingRuntime.isEnabled = includeFFFParsing
-        let found = LegacyFolderScanner.scan(urls: urls, includeFFFParsing: includeFFFParsing)
-        guard !found.isEmpty else {
+        let groupedItems = groupedImportItems(from: urls, includeFFFParsing: includeFFFParsing)
+        guard !groupedItems.isEmpty else {
             statusLabel.stringValue = includeFFFParsing
                 ? "没有找到可处理图片。"
                 : "没有找到可处理图片；FFF/3F 解析已关闭。"
             return
         }
-        for url in found {
-            detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(url))
+
+        var importedPhotoCount = 0
+        var firstImportedPhoto: LegacyPhoto?
+        for item in groupedItems {
+            for url in item.files {
+                detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(url))
+            }
+            let template = templateCompatible(with: item.files.first) ? templateRect : nil
+            let photos = item.files.map { url in
+                let crop = template ?? CGRect(x: 0.05, y: 0.08, width: 0.18, height: 0.72)
+                return LegacyPhoto(url: url, crops: [LegacyCrop(rect: crop)])
+            }
+            guard !photos.isEmpty else { continue }
+            let task = LegacyTask(name: item.name, rootURL: item.rootURL, photos: photos)
+            tasks.append(task)
+            importedPhotoCount += photos.count
+            if firstImportedPhoto == nil {
+                firstImportedPhoto = photos.first
+            }
         }
-        let template = templateCompatible(with: found.first) ? templateRect : nil
-        let photos = found.map { url in
-            let crop = template ?? CGRect(x: 0.05, y: 0.08, width: 0.18, height: 0.72)
-            return LegacyPhoto(url: url, crops: [LegacyCrop(rect: crop)])
-        }
-        let root = taskRootURL(from: urls, fallback: found[0].deletingLastPathComponent())
-        let task = LegacyTask(name: taskName(from: urls, fallback: root), rootURL: root, photos: photos)
-        tasks.append(task)
+        guard importedPhotoCount > 0 else { return }
         selectedTaskIndex = tasks.count - 1
         selectedPhotoIndex = 0
-        exportDirectory = found.first?.deletingLastPathComponent()
-        templateRect = photos.first?.crops.first?.rect ?? template
-        templateImageAspect = found.first.flatMap { cachedImageAspect(url: $0) }
-        rebuildTaskPopup()
+        selectedTaskIndexes = [selectedTaskIndex]
+        lastTaskSelectionIndex = selectedTaskIndex
+        if let firstImportedPhoto {
+            templateRect = firstImportedPhoto.crops.first?.rect ?? templateRect
+            templateImageAspect = cachedImageAspect(url: firstImportedPhoto.url)
+        }
+        rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
         loadSelectedPhoto()
-        statusLabel.stringValue = "已导入 \(photos.count) 张图片。"
+        statusLabel.stringValue = "已导入 \(groupedItems.count) 个任务，共 \(importedPhotoCount) 张图片。"
         refreshSummary()
     }
 
+    private struct LegacyImportGroup {
+        var name: String
+        var rootURL: URL
+        var files: [URL]
+    }
+
+    private func groupedImportItems(from urls: [URL], includeFFFParsing: Bool) -> [LegacyImportGroup] {
+        let standardizedURLs = urls.map { $0.standardizedFileURL }
+        let directoryInputs = standardizedURLs.filter { isDirectory($0) }
+        if directoryInputs.count >= 2 {
+            var groups: [LegacyImportGroup] = directoryInputs.compactMap { directory in
+                let files = LegacyFolderScanner.scan(urls: [directory], includeFFFParsing: includeFFFParsing)
+                guard !files.isEmpty else { return nil }
+                return LegacyImportGroup(name: directory.lastPathComponent, rootURL: directory, files: files)
+            }
+            let fileInputs = standardizedURLs.filter { !isDirectory($0) }
+            groups.append(contentsOf: groupedImportItems(from: fileInputs, includeFFFParsing: includeFFFParsing))
+            return groups
+        }
+
+        var groupsByRoot: [String: LegacyImportGroup] = [:]
+        for url in standardizedURLs {
+            let root = isDirectory(url) ? url : url.deletingLastPathComponent()
+            let files = LegacyFolderScanner.scan(urls: [url], includeFFFParsing: includeFFFParsing)
+            guard !files.isEmpty else { continue }
+            let key = root.path
+            if var existing = groupsByRoot[key] {
+                existing.files.append(contentsOf: files)
+                groupsByRoot[key] = existing
+            } else {
+                groupsByRoot[key] = LegacyImportGroup(name: root.lastPathComponent, rootURL: root, files: files)
+            }
+        }
+
+        return groupsByRoot.values
+            .map { group in
+                var seen = Set<String>()
+                let files = group.files
+                    .filter { seen.insert($0.path).inserted }
+                    .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+                return LegacyImportGroup(name: group.name, rootURL: group.rootURL, files: files)
+            }
+            .filter { !$0.files.isEmpty }
+            .sorted { $0.rootURL.path.localizedStandardCompare($1.rootURL.path) == .orderedAscending }
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+    }
+
     private func loadSelectedPhoto() {
+        previewLoadGeneration += 1
+        let generation = previewLoadGeneration
         guard let task = selectedTask, task.photos.indices.contains(selectedPhotoIndex) else {
             canvas.setImage(NSImage(size: NSSize(width: 1, height: 1)), crops: [], rotationDegrees: 0, inverted: false)
             fileNameLabel.stringValue = "未导入文件"
@@ -1040,18 +1470,54 @@ final class LegacyWindowController: NSViewController {
             return
         }
         let photo = task.photos[selectedPhotoIndex]
-        guard let image = LegacyImageIO.thumbnail(url: photo.url, maxPixelSize: 6200) else {
-            statusLabel.stringValue = "无法打开图片。"
-            return
-        }
-        canvas.setImage(image, crops: photo.crops, rotationDegrees: photo.previewRotationDegrees, inverted: photo.isInverted)
         fileNameLabel.stringValue = "\(task.name)：\(selectedPhotoIndex + 1) / \(task.photos.count)  \(photo.name)"
-        outputLabel.stringValue = "输出：\(exportDirectory?.path ?? photo.url.deletingLastPathComponent().path)"
+        outputLabel.stringValue = effectiveSelectedTaskIndexes().count > 1
+            ? "输出：分别输出到各任务原文件夹"
+            : "输出：\(exportDirectory?.path ?? task.rootURL.path)"
         photoPopup.selectItem(at: selectedPhotoIndex)
-        taskPopup.selectItem(at: selectedTaskIndex)
         rebuildAlgorithmPopup(for: photo)
         updateFilmstripSelection()
         refreshSummary()
+
+        let url = photo.url.standardizedFileURL
+        let cacheKey = url.path as NSString
+        if let cached = previewCache.object(forKey: cacheKey) {
+            canvas.setImage(
+                cached,
+                crops: photo.crops,
+                rotationDegrees: photo.previewRotationDegrees,
+                inverted: photo.isInverted,
+                adjustments: photo.adjustments
+            )
+            return
+        }
+
+        canvas.setImage(NSImage(size: NSSize(width: 1, height: 1)), crops: [], rotationDegrees: 0, inverted: false)
+        statusLabel.stringValue = "正在后台加载预览：\(photo.name)"
+        previewQueue.async { [weak self] in
+            guard let self else { return }
+            var isCurrentRequest = false
+            DispatchQueue.main.sync {
+                isCurrentRequest = generation == self.previewLoadGeneration
+            }
+            guard isCurrentRequest,
+                  let image = LegacyImageIO.thumbnail(url: url, maxPixelSize: 4200) else { return }
+            self.previewCache.setObject(image, forKey: cacheKey)
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      generation == self.previewLoadGeneration,
+                      self.selectedPhoto?.url.standardizedFileURL == url,
+                      let current = self.selectedPhoto else { return }
+                self.canvas.setImage(
+                    image,
+                    crops: current.crops,
+                    rotationDegrees: current.previewRotationDegrees,
+                    inverted: current.isInverted,
+                    adjustments: current.adjustments
+                )
+                self.statusLabel.stringValue = "预览已加载：\(current.name)"
+            }
+        }
     }
 
     private func photoKey(_ url: URL) -> String {
@@ -1059,31 +1525,54 @@ final class LegacyWindowController: NSViewController {
     }
 
     private func rebuildAlgorithmPopup(for photo: LegacyPhoto?) {
-        algorithmPopup.removeAllItems()
+        for subview in algorithmListStack.arrangedSubviews {
+            algorithmListStack.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
         guard let photo,
               let candidates = detectionCandidatesByPhotoPath[photoKey(photo.url)],
               !candidates.isEmpty else {
-            algorithmPopup.addItem(withTitle: "未生成候选")
-            algorithmPopup.isEnabled = false
+            let empty = label("等待自动识别", size: 10, color: NSColor(calibratedWhite: 0.55, alpha: 1))
+            empty.alignment = .center
+            algorithmListStack.addArrangedSubview(empty)
+            empty.widthAnchor.constraint(equalTo: algorithmListStack.widthAnchor).isActive = true
+            empty.heightAnchor.constraint(equalToConstant: 46).isActive = true
             detectionReportLabel.stringValue = "算法候选：等待识别"
+            refreshThemeText(in: algorithmListStack)
             return
         }
-        let titles = candidates.enumerated().map { index, candidate in
-            "\(index + 1). \(candidate.title) · \(candidate.rects.count)张 · \(Int(candidate.score * 100))%"
+        let key = photoKey(photo.url)
+        let selectedIndex = min(selectedAlgorithmIndexByPhotoPath[key] ?? 0, candidates.count - 1)
+        selectedAlgorithmIndexByPhotoPath[key] = selectedIndex
+        for (index, candidate) in candidates.enumerated() {
+            let button = NSButton(
+                title: "\(candidate.title)\n\(candidate.rects.count) 张 · 可信度 \(Int(candidate.score * 100))%",
+                target: self,
+                action: #selector(algorithmCandidateSelected(_:))
+            )
+            button.tag = index
+            button.setButtonType(.radio)
+            button.state = index == selectedIndex ? .on : .off
+            button.alignment = .left
+            button.font = NSFont.systemFont(ofSize: 10, weight: index == selectedIndex ? .semibold : .regular)
+            button.toolTip = candidate.detail
+            button.translatesAutoresizingMaskIntoConstraints = false
+            algorithmListStack.addArrangedSubview(button)
+            button.widthAnchor.constraint(equalTo: algorithmListStack.widthAnchor).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 42).isActive = true
         }
-        algorithmPopup.addItems(withTitles: titles)
-        algorithmPopup.isEnabled = true
-        algorithmPopup.selectItem(at: 0)
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: [], candidates: candidates).reportText
+        refreshThemeText(in: algorithmListStack)
     }
 
-    @objc private func algorithmSelectionChanged() {
+    @objc private func algorithmCandidateSelected(_ sender: NSButton) {
         guard tasks.indices.contains(selectedTaskIndex),
               tasks[selectedTaskIndex].photos.indices.contains(selectedPhotoIndex) else { return }
         let photo = tasks[selectedTaskIndex].photos[selectedPhotoIndex]
         guard let candidates = detectionCandidatesByPhotoPath[photoKey(photo.url)],
-              candidates.indices.contains(algorithmPopup.indexOfSelectedItem) else { return }
-        let candidate = candidates[algorithmPopup.indexOfSelectedItem]
+              candidates.indices.contains(sender.tag) else { return }
+        selectedAlgorithmIndexByPhotoPath[photoKey(photo.url)] = sender.tag
+        let candidate = candidates[sender.tag]
         let crops: [LegacyCrop]
         switch detectionSizingMode {
         case .fixedFirstManual:
@@ -1091,9 +1580,11 @@ final class LegacyWindowController: NSViewController {
                 statusLabel.stringValue = "请先手动调整第一个红框，作为固定识别尺寸。"
                 return
             }
-            crops = Self.templateSizedCrops(from: candidate.rects, template: template)
+            crops = LegacyFrameDetector.isStandardTwoBySixFile(photo.url, detectedRects: candidate.rects)
+                ? Self.templateSizedCrops(from: candidate.rects, template: template)
+                : LegacyFrameDetector.insetAdaptiveRects(candidate.rects).map { LegacyCrop(rect: $0) }
         case .adaptiveBoundary:
-            crops = candidate.rects.sortedForReadingOrder().map { LegacyCrop(rect: $0.normalized) }
+            crops = LegacyFrameDetector.insetAdaptiveRects(candidate.rects).map { LegacyCrop(rect: $0) }
         }
         guard !crops.isEmpty else { return }
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = crops
@@ -1102,16 +1593,18 @@ final class LegacyWindowController: NSViewController {
         canvas.needsDisplay = true
         templateRect = crops.sortedForReadingOrder().first?.rect
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: crops, candidates: candidates).reportText
-        let modeText = detectionSizingMode == .fixedFirstManual ? "已固定为第一手动框大小。" : "每个红框使用自动识别边界。"
+        let usesFixedSize = detectionSizingMode == .fixedFirstManual && LegacyFrameDetector.isStandardTwoBySixFile(photo.url, detectedRects: candidate.rects)
+        let modeText = usesFixedSize ? "135画幅已固定为第一手动框大小。" : "120画幅使用自动识别边界。"
         statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。\(modeText)"
+        rebuildAlgorithmPopup(for: tasks[selectedTaskIndex].photos[selectedPhotoIndex])
         refreshSummary()
     }
 
     @objc private func detectionModeChanged() {
         detectionSizingMode = DetectionSizingMode(rawValue: detectionModePopup.indexOfSelectedItem) ?? .fixedFirstManual
         statusLabel.stringValue = detectionSizingMode == .fixedFirstManual
-            ? "识别模式：以第一个手动调整红框为固定大小。"
-            : "识别模式：每个画面自动适应边界。"
+            ? "识别模式：135画幅使用第一手动框，非 135 文件自动识别真实边界。"
+            : "识别模式：120画幅自动适应画面边界。"
     }
 
     private static func currentFixedTemplate(from crops: [LegacyCrop], fallback: CGRect?) -> CGRect? {
@@ -1139,6 +1632,7 @@ final class LegacyWindowController: NSViewController {
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = canvas.crops
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].previewRotationDegrees = canvas.previewRotationDegrees
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].isInverted = canvas.isInverted
+        tasks[selectedTaskIndex].photos[selectedPhotoIndex].adjustments = canvas.adjustments
         if let selected = canvas.currentTemplateRect {
             templateRect = selected
             if updateTemplateAspect {
@@ -1189,15 +1683,126 @@ final class LegacyWindowController: NSViewController {
         return Double(width) / Double(height)
     }
 
-    private func rebuildTaskPopup() {
-        taskPopup.removeAllItems()
-        if tasks.isEmpty {
-            taskPopup.addItem(withTitle: "未导入任务")
-        } else {
-            taskPopup.addItems(withTitles: tasks.enumerated().map { item in
-                let stopped = item.element.isStopped ? "已终止" : "运行中"
-                return "\(item.offset + 1). \(item.element.name) · \(item.element.photos.count) 张 · \(stopped)"
-            })
+    private func rebuildTaskList() {
+        for subview in taskListStack.arrangedSubviews {
+            taskListStack.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
+        updateTaskCountLabel(in: view)
+        guard !tasks.isEmpty else {
+            let empty = label("暂无任务\n拖入文件夹或点击导入", size: 10, color: NSColor(calibratedWhite: 0.55, alpha: 1))
+            empty.alignment = .center
+            empty.maximumNumberOfLines = 3
+            empty.translatesAutoresizingMaskIntoConstraints = false
+            taskListStack.addArrangedSubview(empty)
+            empty.widthAnchor.constraint(equalTo: taskListStack.widthAnchor).isActive = true
+            empty.heightAnchor.constraint(equalToConstant: 70).isActive = true
+            refreshThemeText(in: taskListStack)
+            return
+        }
+        for (index, task) in tasks.enumerated() {
+            let row = LegacyTaskRowView()
+            row.isSelected = selectedTaskIndexes.contains(index) || index == selectedTaskIndex
+            row.isStopped = task.isStopped
+            row.translatesAutoresizingMaskIntoConstraints = false
+
+            let select = NSButton(title: "", target: self, action: #selector(taskListSelectionChanged(_:)))
+            select.tag = index
+            select.isBordered = false
+            select.translatesAutoresizingMaskIntoConstraints = false
+
+            let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(taskListSelectionChanged(_:)))
+            checkbox.identifier = NSUserInterfaceItemIdentifier("taskSelectionCheckbox")
+            checkbox.tag = index
+            checkbox.state = selectedTaskIndexes.contains(index) ? .on : .off
+            checkbox.toolTip = "勾选任务；Command 点击增减选择，Shift 点击连续多选"
+            checkbox.translatesAutoresizingMaskIntoConstraints = false
+
+            let name = NSTextField(labelWithString: task.name)
+            name.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+            name.textColor = NSColor(calibratedWhite: 0.9, alpha: 1)
+            name.lineBreakMode = .byTruncatingMiddle
+            name.translatesAutoresizingMaskIntoConstraints = false
+
+            let stateText = task.isStopped ? "已终止" : "运行中"
+            let detail = NSTextField(labelWithString: "\(task.photos.count) 张 · \(stateText)")
+            detail.font = NSFont.systemFont(ofSize: 9)
+            detail.textColor = task.isStopped
+                ? NSColor(calibratedRed: 0.86, green: 0.48, blue: 0.48, alpha: 1)
+                : NSColor(calibratedWhite: 0.58, alpha: 1)
+            detail.translatesAutoresizingMaskIntoConstraints = false
+
+            let remove = iconButton("NSTrashFull", action: #selector(deleteTaskFromList(_:)), help: "删除这个任务")
+            remove.tag = index
+            let reveal = imageButton(revealIcon(), action: #selector(openTaskFolderFromList(_:)), help: "打开这个任务的文件夹")
+            reveal.tag = index
+
+            for item in [select, checkbox, name, detail, reveal, remove] {
+                row.addSubview(item)
+            }
+            taskListStack.addArrangedSubview(row)
+            NSLayoutConstraint.activate([
+                row.widthAnchor.constraint(equalTo: taskListStack.widthAnchor),
+                row.heightAnchor.constraint(equalToConstant: 58),
+                select.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+                select.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+                select.topAnchor.constraint(equalTo: row.topAnchor),
+                select.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+                checkbox.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 7),
+                checkbox.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                checkbox.widthAnchor.constraint(equalToConstant: 18),
+                checkbox.heightAnchor.constraint(equalToConstant: 18),
+                name.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 7),
+                name.trailingAnchor.constraint(equalTo: reveal.leadingAnchor, constant: -6),
+                name.topAnchor.constraint(equalTo: row.topAnchor, constant: 9),
+                detail.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+                detail.trailingAnchor.constraint(equalTo: name.trailingAnchor),
+                detail.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 3),
+                reveal.widthAnchor.constraint(equalToConstant: 26),
+                reveal.heightAnchor.constraint(equalToConstant: 24),
+                reveal.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                reveal.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -4),
+                remove.widthAnchor.constraint(equalToConstant: 26),
+                remove.heightAnchor.constraint(equalToConstant: 24),
+                remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                remove.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -7)
+            ])
+            row.addSubview(checkbox, positioned: .above, relativeTo: select)
+            row.addSubview(remove, positioned: .above, relativeTo: select)
+        }
+        refreshThemeText(in: taskListStack)
+    }
+
+    private func updateTaskListSelectionAppearance() {
+        for (index, view) in taskListStack.arrangedSubviews.enumerated() {
+            guard tasks.indices.contains(index), let row = view as? LegacyTaskRowView else { continue }
+            row.isSelected = selectedTaskIndexes.contains(index) || index == selectedTaskIndex
+            for subview in row.subviews {
+                guard let checkbox = subview as? NSButton,
+                      checkbox.identifier == NSUserInterfaceItemIdentifier("taskSelectionCheckbox") else { continue }
+                checkbox.state = selectedTaskIndexes.contains(index) ? .on : .off
+            }
+        }
+    }
+
+    private func scheduleFilmstripRefresh() {
+        pendingFilmstripRefresh?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.rebuildFilmstrip()
+        }
+        pendingFilmstripRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+    }
+
+    private func updateTaskCountLabel(in root: NSView) {
+        for subview in root.subviews {
+            if let field = subview as? NSTextField,
+               field.identifier == NSUserInterfaceItemIdentifier("taskCountLabel") {
+                let selectedCount = effectiveSelectedTaskIndexes().count
+                field.stringValue = selectedCount > 1 ? "已选 \(selectedCount) / \(tasks.count)" : "\(tasks.count)"
+                return
+            }
+            updateTaskCountLabel(in: subview)
         }
     }
 
@@ -1215,93 +1820,93 @@ final class LegacyWindowController: NSViewController {
             filmstripStack.removeArrangedSubview(subview)
             subview.removeFromSuperview()
         }
-        guard let task = selectedTask else { return }
-        for (index, photo) in task.photos.enumerated() {
-            let imageView = NSImageView()
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.imageAlignment = .alignCenter
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            imageView.wantsLayer = true
-            imageView.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1).cgColor
-            imageView.layer?.cornerRadius = 2
+        filmstripPhotoRefs = []
+        let taskIndexes = effectiveSelectedTaskIndexes()
+        for taskIndex in taskIndexes {
+            guard tasks.indices.contains(taskIndex) else { continue }
+            let task = tasks[taskIndex]
+            for (photoIndex, photo) in task.photos.enumerated() {
+                let filmstripIndex = filmstripPhotoRefs.count
+                filmstripPhotoRefs.append((taskIndex: taskIndex, photoIndex: photoIndex))
+                let imageView = NSImageView()
+                imageView.image = cachedFileTypeIcon(for: photo.url)
+                imageView.imageScaling = .scaleProportionallyDown
+                imageView.imageAlignment = .alignCenter
+                imageView.translatesAutoresizingMaskIntoConstraints = false
 
-            let titleLabel = NSTextField(labelWithString: photo.name)
-            titleLabel.alignment = .center
-            titleLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-            titleLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
-            titleLabel.lineBreakMode = .byTruncatingMiddle
-            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+                let titleText = taskIndexes.count > 1 ? "\(task.name) · \(photo.name)" : photo.name
+                let titleLabel = NSTextField(labelWithString: titleText)
+                titleLabel.alignment = .left
+                titleLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+                titleLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+                titleLabel.lineBreakMode = .byTruncatingMiddle
+                titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-            let button = NSButton(title: "", target: self, action: #selector(filmstripPhotoSelected(_:)))
-            button.tag = index
-            button.isBordered = false
-            button.bezelStyle = .regularSquare
-            button.setButtonType(.momentaryPushIn)
-            button.translatesAutoresizingMaskIntoConstraints = false
+                let button = NSButton(title: "", target: self, action: #selector(filmstripPhotoSelected(_:)))
+                button.tag = filmstripIndex
+                button.isBordered = false
+                button.bezelStyle = .regularSquare
+                button.setButtonType(.momentaryPushIn)
+                button.translatesAutoresizingMaskIntoConstraints = false
 
-            let deleteButton = NSButton(title: "×", target: self, action: #selector(deleteFilmstripPhoto(_:)))
-            deleteButton.tag = index
-            deleteButton.bezelStyle = .circular
-            deleteButton.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-            deleteButton.toolTip = "从当前任务移除这个文件"
-            deleteButton.translatesAutoresizingMaskIntoConstraints = false
-            let tile = LegacyFilmstripTileView()
-            tile.translatesAutoresizingMaskIntoConstraints = false
-            tile.addSubview(imageView)
-            tile.addSubview(titleLabel)
-            tile.addSubview(button)
-            tile.addSubview(deleteButton)
-            NSLayoutConstraint.activate([
-                tile.widthAnchor.constraint(equalToConstant: 184),
-                tile.heightAnchor.constraint(equalToConstant: 128),
-                imageView.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
-                imageView.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -8),
-                imageView.topAnchor.constraint(equalTo: tile.topAnchor, constant: 8),
-                imageView.heightAnchor.constraint(equalToConstant: 88),
-                titleLabel.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
-                titleLabel.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -8),
-                titleLabel.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 6),
-                button.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
-                button.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -34),
-                button.topAnchor.constraint(equalTo: tile.topAnchor, constant: 4),
-                button.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -4),
-                deleteButton.widthAnchor.constraint(equalToConstant: 24),
-                deleteButton.heightAnchor.constraint(equalToConstant: 24),
-                deleteButton.topAnchor.constraint(equalTo: tile.topAnchor, constant: 7),
-                deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -7)
-            ])
-            tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
-            filmstripStack.addArrangedSubview(tile)
-            let taskIndex = selectedTaskIndex
-            let cacheKey = photoKey(photo.url)
-            if let cached = thumbnailCache[cacheKey] {
-                imageView.image = cached
-                continue
-            }
-            thumbnailQueue.async { [weak self, weak imageView] in
-                guard let thumb = LegacyImageIO.thumbnail(url: photo.url, maxPixelSize: 260) else { return }
-                DispatchQueue.main.async {
-                    guard let self = self,
-                          self.selectedTaskIndex == taskIndex,
-                          imageView?.superview != nil else { return }
-                    self.thumbnailCache[cacheKey] = thumb
-                    imageView?.image = thumb
-                }
+                let deleteButton = NSButton(title: "×", target: self, action: #selector(deleteFilmstripPhoto(_:)))
+                deleteButton.tag = filmstripIndex
+                deleteButton.bezelStyle = .circular
+                deleteButton.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+                deleteButton.toolTip = "从当前任务移除这个文件"
+                deleteButton.translatesAutoresizingMaskIntoConstraints = false
+                let tile = LegacyFilmstripTileView()
+                tile.translatesAutoresizingMaskIntoConstraints = false
+                tile.addSubview(imageView)
+                tile.addSubview(titleLabel)
+                tile.addSubview(button)
+                tile.addSubview(deleteButton)
+                NSLayoutConstraint.activate([
+                    tile.widthAnchor.constraint(equalToConstant: 166),
+                    tile.heightAnchor.constraint(equalToConstant: 44),
+                    imageView.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 8),
+                    imageView.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                    imageView.widthAnchor.constraint(equalToConstant: 28),
+                    imageView.heightAnchor.constraint(equalToConstant: 28),
+                    titleLabel.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
+                    titleLabel.trailingAnchor.constraint(equalTo: deleteButton.leadingAnchor, constant: -6),
+                    titleLabel.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                    button.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 4),
+                    button.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -34),
+                    button.topAnchor.constraint(equalTo: tile.topAnchor, constant: 4),
+                    button.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -4),
+                    deleteButton.widthAnchor.constraint(equalToConstant: 22),
+                    deleteButton.heightAnchor.constraint(equalToConstant: 22),
+                    deleteButton.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+                    deleteButton.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -6)
+                ])
+                tile.addSubview(deleteButton, positioned: .above, relativeTo: button)
+                filmstripStack.addArrangedSubview(tile)
             }
         }
+        refreshThemeText(in: filmstripStack)
         updateFilmstripSelection()
     }
 
+    private func cachedFileTypeIcon(for url: URL) -> NSImage {
+        let key = url.pathExtension.lowercased()
+        if let cached = fileTypeIconCache[key] { return cached }
+        let icon = NSWorkspace.shared.icon(forFileType: key.isEmpty ? "public.data" : key)
+        fileTypeIconCache[key] = icon
+        return icon
+    }
+
     private func updateFilmstripSelection() {
-        for view in filmstripStack.arrangedSubviews {
+        for (filmstripIndex, view) in filmstripStack.arrangedSubviews.enumerated() {
+            let isCurrent = filmstripPhotoRefs.indices.contains(filmstripIndex)
+                && filmstripPhotoRefs[filmstripIndex].taskIndex == selectedTaskIndex
+                && filmstripPhotoRefs[filmstripIndex].photoIndex == selectedPhotoIndex
             if let tile = view as? LegacyFilmstripTileView {
-                tile.isSelected = filmstripButtons(in: tile).contains { button in
-                    button.action == #selector(filmstripPhotoSelected(_:)) && button.tag == selectedPhotoIndex
-                }
+                tile.isSelected = isCurrent
             }
             let buttons = filmstripButtons(in: view)
             for button in buttons where button.action == #selector(filmstripPhotoSelected(_:)) {
-                button.state = button.tag == selectedPhotoIndex ? .on : .off
+                button.state = isCurrent ? .on : .off
             }
         }
     }
@@ -1317,14 +1922,96 @@ final class LegacyWindowController: NSViewController {
         return result
     }
 
-    @objc private func taskSelectionChanged() {
+    @objc private func taskListSelectionChanged(_ sender: NSButton) {
+        let index = sender.tag
+        guard tasks.indices.contains(index) else { return }
+        let previousSelection = selectedTaskIndexes
+        let previousActiveIndex = selectedTaskIndex
+        let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+        let isCheckbox = sender.identifier == NSUserInterfaceItemIdentifier("taskSelectionCheckbox")
+
+        if modifiers.contains(.shift), let anchor = lastTaskSelectionIndex {
+            let range = Set(min(anchor, index)...max(anchor, index))
+            selectedTaskIndexes = modifiers.contains(.command)
+                ? selectedTaskIndexes.union(range)
+                : range
+        } else if modifiers.contains(.command) || isCheckbox {
+            if selectedTaskIndexes.contains(index) {
+                selectedTaskIndexes.remove(index)
+            } else {
+                selectedTaskIndexes.insert(index)
+            }
+        } else {
+            selectedTaskIndexes = [index]
+        }
+
+        if selectedTaskIndexes.isEmpty {
+            selectedTaskIndexes = [index]
+        }
+        lastTaskSelectionIndex = index
+        let activeIndex = selectedTaskIndexes.contains(index)
+            ? index
+            : (selectedTaskIndexes.sorted().first ?? index)
+        if activeIndex != previousActiveIndex {
+            selectTask(
+                at: activeIndex,
+                preserveTaskSelection: true,
+                refreshFilmstrip: previousSelection != selectedTaskIndexes
+            )
+        } else {
+            updateTaskListSelectionAppearance()
+            if previousSelection != selectedTaskIndexes {
+                scheduleFilmstripRefresh()
+            }
+            outputLabel.stringValue = effectiveSelectedTaskIndexes().count > 1
+                ? "输出：分别输出到各任务原文件夹"
+                : "输出：\(exportDirectory?.path ?? tasks[activeIndex].rootURL.path)"
+            refreshSummary()
+        }
+    }
+
+    private func selectTask(at index: Int, preserveTaskSelection: Bool = false, refreshFilmstrip: Bool = true) {
+        guard tasks.indices.contains(index) else { return }
         saveCurrentCrops()
-        selectedTaskIndex = max(0, taskPopup.indexOfSelectedItem)
+        selectedTaskIndex = index
         selectedPhotoIndex = 0
-        exportDirectory = selectedTask?.rootURL
+        if !preserveTaskSelection {
+            selectedTaskIndexes = [index]
+            lastTaskSelectionIndex = index
+        }
+        updateTaskListSelectionAppearance()
         rebuildPhotoPopup()
-        rebuildFilmstrip()
+        if refreshFilmstrip {
+            scheduleFilmstripRefresh()
+        } else {
+            updateFilmstripSelection()
+        }
         loadSelectedPhoto()
+    }
+
+    private func effectiveSelectedTaskIndexes() -> [Int] {
+        let valid = selectedTaskIndexes.filter { tasks.indices.contains($0) }.sorted()
+        if !valid.isEmpty { return valid }
+        return tasks.indices.contains(selectedTaskIndex) ? [selectedTaskIndex] : []
+    }
+
+    private func adjustTaskSelectionAfterDeletion(at deletedIndex: Int) {
+        selectedTaskIndexes = Set(selectedTaskIndexes.compactMap { index in
+            if index == deletedIndex { return nil }
+            return index > deletedIndex ? index - 1 : index
+        })
+        if let anchor = lastTaskSelectionIndex {
+            if anchor == deletedIndex {
+                lastTaskSelectionIndex = nil
+            } else if anchor > deletedIndex {
+                lastTaskSelectionIndex = anchor - 1
+            }
+        }
+        if selectedTaskIndexes.isEmpty, !tasks.isEmpty {
+            let fallback = min(deletedIndex, tasks.count - 1)
+            selectedTaskIndexes = [fallback]
+            lastTaskSelectionIndex = fallback
+        }
     }
 
     @objc private func photoSelectionChanged() {
@@ -1334,50 +2021,69 @@ final class LegacyWindowController: NSViewController {
     }
 
     @objc private func filmstripPhotoSelected(_ sender: NSButton) {
+        guard filmstripPhotoRefs.indices.contains(sender.tag) else { return }
         saveCurrentCrops()
-        selectedPhotoIndex = sender.tag
+        let ref = filmstripPhotoRefs[sender.tag]
+        selectedTaskIndex = ref.taskIndex
+        selectedPhotoIndex = ref.photoIndex
+        updateTaskListSelectionAppearance()
+        rebuildPhotoPopup()
         loadSelectedPhoto()
     }
 
     @objc private func deleteFilmstripPhoto(_ sender: NSButton) {
-        guard tasks.indices.contains(selectedTaskIndex),
-              tasks[selectedTaskIndex].photos.indices.contains(sender.tag) else { return }
-        let removedPhoto = tasks[selectedTaskIndex].photos[sender.tag]
-        let name = removedPhoto.name
-        detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(removedPhoto.url))
-        thumbnailCache.removeValue(forKey: photoKey(removedPhoto.url))
-        if sender.tag != selectedPhotoIndex {
+        guard filmstripPhotoRefs.indices.contains(sender.tag) else { return }
+        let ref = filmstripPhotoRefs[sender.tag]
+        guard tasks.indices.contains(ref.taskIndex),
+              tasks[ref.taskIndex].photos.indices.contains(ref.photoIndex) else { return }
+        if ref.taskIndex != selectedTaskIndex || ref.photoIndex != selectedPhotoIndex {
             saveCurrentCrops()
         }
+        selectedTaskIndex = ref.taskIndex
+        selectedPhotoIndex = ref.photoIndex
+        let removedPhoto = tasks[selectedTaskIndex].photos[selectedPhotoIndex]
+        let name = removedPhoto.name
+        detectionCandidatesByPhotoPath.removeValue(forKey: photoKey(removedPhoto.url))
         let previousSelection = selectedPhotoIndex
-        tasks[selectedTaskIndex].photos.remove(at: sender.tag)
+        let removedCurrentPhoto = true
+        tasks[selectedTaskIndex].photos.remove(at: selectedPhotoIndex)
         if tasks[selectedTaskIndex].photos.isEmpty {
             let taskName = tasks[selectedTaskIndex].name
+            let deletedTaskIndex = selectedTaskIndex
             tasks.remove(at: selectedTaskIndex)
-            selectedTaskIndex = min(selectedTaskIndex, max(0, tasks.count - 1))
+            adjustTaskSelectionAfterDeletion(at: deletedTaskIndex)
+            selectedTaskIndex = min(deletedTaskIndex, max(0, tasks.count - 1))
             selectedPhotoIndex = 0
             statusLabel.stringValue = "已移除文件 \(name)，任务 \(taskName) 已为空并删除。"
         } else {
-            if sender.tag == previousSelection {
-                selectedPhotoIndex = min(previousSelection, tasks[selectedTaskIndex].photos.count - 1)
-            } else if sender.tag < previousSelection {
-                selectedPhotoIndex = max(0, previousSelection - 1)
-            } else {
-                selectedPhotoIndex = min(previousSelection, tasks[selectedTaskIndex].photos.count - 1)
-            }
+            selectedPhotoIndex = min(previousSelection, tasks[selectedTaskIndex].photos.count - 1)
             statusLabel.stringValue = "已从当前任务移除文件：\(name)"
         }
-        rebuildTaskPopup()
+        rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
-        loadSelectedPhoto()
+        if removedCurrentPhoto || tasks.isEmpty {
+            loadSelectedPhoto()
+        } else {
+            photoPopup.selectItem(at: selectedPhotoIndex)
+            updateFilmstripSelection()
+            refreshSummary()
+        }
     }
 
     @objc private func stopSelectedTask() {
-        guard tasks.indices.contains(selectedTaskIndex) else { return }
-        tasks[selectedTaskIndex].isStopped = true
-        statusLabel.stringValue = "已终止任务：\(tasks[selectedTaskIndex].name)"
-        rebuildTaskPopup()
+        stopTask(at: selectedTaskIndex)
+    }
+
+    @objc private func stopTaskFromList(_ sender: NSButton) {
+        stopTask(at: sender.tag)
+    }
+
+    private func stopTask(at index: Int) {
+        guard tasks.indices.contains(index) else { return }
+        tasks[index].isStopped = true
+        statusLabel.stringValue = "已终止任务：\(tasks[index].name)"
+        rebuildTaskList()
         refreshSummary()
     }
 
@@ -1391,13 +2097,41 @@ final class LegacyWindowController: NSViewController {
         statusLabel.stringValue = "已打开当前图片所在文件夹。"
     }
 
+    @objc private func openCurrentTaskFolder() {
+        guard let task = selectedTask else {
+            statusLabel.stringValue = "当前没有选中的任务。"
+            return
+        }
+        NSWorkspace.shared.open(task.rootURL)
+        statusLabel.stringValue = "已打开当前任务文件夹。"
+    }
+
+    @objc private func openTaskFolderFromList(_ sender: NSButton) {
+        guard tasks.indices.contains(sender.tag) else { return }
+        NSWorkspace.shared.open(tasks[sender.tag].rootURL)
+        statusLabel.stringValue = "已打开任务文件夹：\(tasks[sender.tag].name)"
+    }
+
     @objc private func deleteSelectedTask() {
-        guard tasks.indices.contains(selectedTaskIndex) else { return }
-        let name = tasks[selectedTaskIndex].name
-        tasks.remove(at: selectedTaskIndex)
-        selectedTaskIndex = min(selectedTaskIndex, max(0, tasks.count - 1))
+        deleteTask(at: selectedTaskIndex)
+    }
+
+    @objc private func deleteTaskFromList(_ sender: NSButton) {
+        deleteTask(at: sender.tag)
+    }
+
+    private func deleteTask(at index: Int) {
+        guard tasks.indices.contains(index) else { return }
+        let name = tasks[index].name
+        tasks.remove(at: index)
+        adjustTaskSelectionAfterDeletion(at: index)
+        if selectedTaskIndex > index {
+            selectedTaskIndex -= 1
+        } else if selectedTaskIndex == index {
+            selectedTaskIndex = min(index, max(0, tasks.count - 1))
+        }
         selectedPhotoIndex = 0
-        rebuildTaskPopup()
+        rebuildTaskList()
         rebuildPhotoPopup()
         rebuildFilmstrip()
         loadSelectedPhoto()
@@ -1406,31 +2140,39 @@ final class LegacyWindowController: NSViewController {
 
     @objc private func applyCropsToCurrentTask() {
         saveCurrentCrops()
-        guard tasks.indices.contains(selectedTaskIndex), !canvas.crops.isEmpty else { return }
-        guard !tasks[selectedTaskIndex].isStopped else {
-            statusLabel.stringValue = "当前任务已终止，无法应用到全部。"
+        guard !canvas.crops.isEmpty else { return }
+        let taskIndexes = effectiveSelectedTaskIndexes().filter {
+            tasks.indices.contains($0) && !tasks[$0].isStopped && !tasks[$0].photos.isEmpty
+        }
+        guard !taskIndexes.isEmpty else {
+            statusLabel.stringValue = "没有可应用的已选任务。"
             return
         }
-        let taskIndex = selectedTaskIndex
         let sourceCrops = canvas.crops.sortedForReadingOrder()
         let anchor = sourceCrops[0].rect.normalized
-        let photos = tasks[taskIndex].photos
-        let selectedIndex = selectedPhotoIndex
-        statusLabel.stringValue = "正在以左上第一帧黑边为基准应用到其他图片..."
+        let selectedTask = selectedTaskIndex
+        let selectedPhoto = selectedPhotoIndex
+        let snapshots = taskIndexes.map { ($0, tasks[$0].photos) }
+        statusLabel.stringValue = "正在将当前红框应用到 \(taskIndexes.count) 个任务..."
         DispatchQueue.global(qos: .userInitiated).async {
-            let results = photos.enumerated().map { index, photo in
-                if index == selectedIndex {
-                    return sourceCrops
+            let results = snapshots.map { taskIndex, photos in
+                let crops = photos.enumerated().map { photoIndex, photo in
+                    if taskIndex == selectedTask && photoIndex == selectedPhoto {
+                        return sourceCrops
+                    }
+                    return LegacyFrameDetector.anchorAlignedCrops(url: photo.url, sourceCrops: sourceCrops, anchor: anchor)
                 }
-                return LegacyFrameDetector.anchorAlignedCrops(url: photo.url, sourceCrops: sourceCrops, anchor: anchor)
+                return (taskIndex, crops)
             }
             DispatchQueue.main.async {
-                guard self.tasks.indices.contains(taskIndex) else { return }
-                for index in self.tasks[taskIndex].photos.indices {
-                    self.tasks[taskIndex].photos[index].crops = results[index]
+                for (taskIndex, cropsByPhoto) in results where self.tasks.indices.contains(taskIndex) {
+                    for photoIndex in self.tasks[taskIndex].photos.indices
+                    where cropsByPhoto.indices.contains(photoIndex) {
+                        self.tasks[taskIndex].photos[photoIndex].crops = cropsByPhoto[photoIndex]
+                    }
                 }
                 self.loadSelectedPhoto()
-                self.statusLabel.stringValue = "已保留当前图片微调结果，并按左上第一帧黑边基准应用到其他图片。"
+                self.statusLabel.stringValue = "已将当前红框应用到 \(taskIndexes.count) 个已选任务。"
                 self.refreshSummary()
             }
         }
@@ -1443,6 +2185,13 @@ final class LegacyWindowController: NSViewController {
         templateRect = rect
         canvas.needsDisplay = true
         saveCurrentCrops()
+        refreshSummary()
+    }
+
+    @objc private func deleteCurrentCrop() {
+        canvas.deleteSelectedCrop()
+        saveCurrentCrops()
+        statusLabel.stringValue = "已删除当前选中的红框。"
         refreshSummary()
     }
 
@@ -1493,6 +2242,20 @@ final class LegacyWindowController: NSViewController {
         statusLabel.stringValue = canvas.isInverted ? "已反相当前图片，导出会保持反相效果。" : "已取消当前图片反相。"
     }
 
+    @objc private func autoToneAndColor() {
+        guard tasks.indices.contains(selectedTaskIndex),
+              tasks[selectedTaskIndex].photos.indices.contains(selectedPhotoIndex) else { return }
+        guard let adjustments = canvas.makeAutomaticAdjustments() else {
+            statusLabel.stringValue = "自动校色失败：无法读取当前图片像素。"
+            return
+        }
+        canvas.adjustments = adjustments
+        saveCurrentCrops(updateTemplateAspect: false)
+        statusLabel.stringValue = canvas.isInverted
+            ? "已在反相图像上完成自动色调、自动对比度和自动颜色。"
+            : "已完成自动色调、自动对比度和自动颜色；底片建议先反相再使用。"
+    }
+
     @objc private func toggleMagnifier() {
         canvas.isMagnifierEnabled.toggle()
         statusLabel.stringValue = canvas.isMagnifierEnabled ? "已开启拖动放大镜。" : "已关闭拖动放大镜。"
@@ -1502,15 +2265,27 @@ final class LegacyWindowController: NSViewController {
         guard !canvas.crops.isEmpty else { return }
         canvas.crops = canvas.crops.map { LegacyCrop(rect: $0.rect.offsetBy(dx: dx, dy: dy).normalized, angle: $0.angle) }
         saveCurrentCrops()
-        statusLabel.stringValue = "已统一微调当前图片全部红框。"
+        statusLabel.stringValue = "已用 Command＋方向键统一移动全部红框。"
+        refreshSummary()
+    }
+
+    private func nudgeSelectedCrop(dx: CGFloat, dy: CGFloat) {
+        guard canvas.nudgeSelectedCrop(dx: dx, dy: dy) else {
+            statusLabel.stringValue = "请先点击选择一个红框，再使用方向键移动。"
+            return
+        }
+        saveCurrentCrops()
+        statusLabel.stringValue = "已用方向键移动选中的红框。"
         refreshSummary()
     }
 
     @objc private func autoIdentify() {
         saveCurrentCrops()
-        guard tasks.indices.contains(selectedTaskIndex), !tasks[selectedTaskIndex].photos.isEmpty else { return }
-        guard !tasks[selectedTaskIndex].isStopped else {
-            statusLabel.stringValue = "当前任务已终止，无法自动识别。"
+        let taskIndexes = effectiveSelectedTaskIndexes().filter {
+            tasks.indices.contains($0) && !tasks[$0].isStopped && !tasks[$0].photos.isEmpty
+        }
+        guard !taskIndexes.isEmpty else {
+            statusLabel.stringValue = "没有可识别的已选任务。"
             return
         }
         let mode = detectionSizingMode
@@ -1519,37 +2294,61 @@ final class LegacyWindowController: NSViewController {
             statusLabel.stringValue = "请先手动调整第一个红框，再使用固定大小识别。"
             return
         }
-        let taskIndex = selectedTaskIndex
-        let photos = tasks[taskIndex].photos
-        let selectedIndex = selectedPhotoIndex
+        let selectedTask = selectedTaskIndex
+        let selectedPhoto = selectedPhotoIndex
+        let snapshots = taskIndexes.map { ($0, tasks[$0].photos) }
+        let photoCount = snapshots.reduce(0) { $0 + $1.1.count }
         statusLabel.stringValue = mode == .fixedFirstManual
-            ? "正在按第一个手动框的固定大小识别..."
-            : "正在按每个画面的实际边界自动识别..."
+            ? "正在按第一个手动框的固定大小识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
+            : "正在按实际画面边界识别 \(taskIndexes.count) 个任务，共 \(photoCount) 张图片..."
         DispatchQueue.global(qos: .userInitiated).async {
-            let detections = photos.map { photo -> LegacyDetectionResult in
-                if mode == .fixedFirstManual, let template {
-                    let result = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
-                    if result.crops.isEmpty {
-                        return LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: result.candidates)
+            let results = snapshots.map { taskIndex, photos in
+                let detections = photos.map { photo -> LegacyDetectionResult in
+                    if mode == .fixedFirstManual, let template {
+                        if LegacyFrameDetector.hasStandardTwoBySixResolution(photo.url) {
+                            let standard = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
+                            let detectedRects = standard.candidates.first?.rects ?? standard.crops.map(\.rect)
+                            let fixed = Self.templateSizedCrops(from: detectedRects, template: template)
+                            return LegacyDetectionResult(
+                                crops: fixed.isEmpty ? LegacyFrameDetector.tiledCrops(template: template) : fixed,
+                                candidates: standard.candidates
+                            )
+                        }
+                        let automatic = LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                        if !automatic.crops.isEmpty {
+                            guard LegacyFrameDetector.isStandardTwoBySixLayout(automatic.crops.map(\.rect)) else {
+                                return LegacyFrameDetector.insetAdaptiveResult(automatic)
+                            }
+                            let fixed = Self.templateSizedCrops(from: automatic.crops.map(\.rect), template: template)
+                            return LegacyDetectionResult(crops: fixed, candidates: automatic.candidates)
+                        }
+                        let fallback = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
+                        return fallback.crops.isEmpty
+                            ? LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: fallback.candidates)
+                            : fallback
                     }
-                    let candidate = result.candidates.first
-                    let fixed = Self.templateSizedCrops(from: candidate?.rects ?? result.crops.map(\.rect), template: template)
-                    return LegacyDetectionResult(crops: fixed, candidates: result.candidates)
+                    return LegacyFrameDetector.insetAdaptiveResult(
+                        LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                    )
                 }
-                return LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                return (taskIndex, photos, detections)
             }
             DispatchQueue.main.async {
-                guard self.tasks.indices.contains(taskIndex) else { return }
-                for index in self.tasks[taskIndex].photos.indices {
-                    self.tasks[taskIndex].photos[index].crops = detections[index].crops
-                    self.detectionCandidatesByPhotoPath[self.photoKey(photos[index].url)] = detections[index].candidates
+                var cropCount = 0
+                for (taskIndex, photos, detections) in results where self.tasks.indices.contains(taskIndex) {
+                    for photoIndex in self.tasks[taskIndex].photos.indices
+                    where detections.indices.contains(photoIndex) && photos.indices.contains(photoIndex) {
+                        self.tasks[taskIndex].photos[photoIndex].crops = detections[photoIndex].crops
+                        self.detectionCandidatesByPhotoPath[self.photoKey(photos[photoIndex].url)] = detections[photoIndex].candidates
+                        cropCount += detections[photoIndex].crops.count
+                    }
                 }
                 self.loadSelectedPhoto()
-                let count = detections.reduce(0) { $0 + $1.crops.count }
-                if detections.indices.contains(selectedIndex) {
-                    self.detectionReportLabel.stringValue = detections[selectedIndex].reportText
+                if let selectedResult = results.first(where: { $0.0 == selectedTask }),
+                   selectedResult.2.indices.contains(selectedPhoto) {
+                    self.detectionReportLabel.stringValue = selectedResult.2[selectedPhoto].reportText
                 }
-                self.statusLabel.stringValue = "已识别 \(photos.count) 张图片，共 \(count) 个红框。"
+                self.statusLabel.stringValue = "已识别 \(taskIndexes.count) 个任务、\(photoCount) 张图片，共 \(cropCount) 个红框；非 135 文件已自动使用真实边界。"
                 self.refreshSummary()
             }
         }
@@ -1557,24 +2356,36 @@ final class LegacyWindowController: NSViewController {
 
     @objc private func exportCrops() {
         saveCurrentCrops()
-        guard let task = selectedTask, !task.photos.isEmpty else { return }
-        guard !task.isStopped else {
-            statusLabel.stringValue = "当前任务已终止，无法导出。"
+        let taskIndexes = effectiveSelectedTaskIndexes().filter {
+            tasks.indices.contains($0) && !tasks[$0].isStopped && !tasks[$0].photos.isEmpty
+        }
+        guard !taskIndexes.isEmpty else {
+            statusLabel.stringValue = "没有可导出的已选任务。"
             return
         }
-        let directory = exportDirectory ?? task.rootURL
         let format = exportFormat
         let dustEnabled = dustRemovalEnabled
         let dustStrength = dustRemovalStrength
-        let photos = task.photos
-        statusLabel.stringValue = dustEnabled ? "正在批量导出并除尘..." : "正在批量导出..."
+        let usesSeparateFolders = taskIndexes.count > 1
+        let snapshots = taskIndexes.map { taskIndex -> (String, URL, [LegacyPhoto]) in
+            let task = tasks[taskIndex]
+            let directory = usesSeparateFolders ? task.rootURL : (exportDirectory ?? task.rootURL)
+            return (task.name, directory, task.photos)
+        }
+        statusLabel.stringValue = dustEnabled
+            ? "正在将 \(taskIndexes.count) 个任务分别导出并除尘..."
+            : "正在将 \(taskIndexes.count) 个任务分别导出..."
         DispatchQueue.global(qos: .userInitiated).async {
             var outputs: [URL] = []
-            for photo in photos {
-                outputs.append(contentsOf: LegacyExporter.export(url: photo.url, crops: photo.crops, directory: directory, format: format, dustEnabled: dustEnabled, dustStrength: dustStrength, rotationDegrees: photo.previewRotationDegrees, inverted: photo.isInverted, adjustments: photo.adjustments))
+            for (_, directory, photos) in snapshots {
+                for photo in photos {
+                    outputs.append(contentsOf: LegacyExporter.export(url: photo.url, crops: photo.crops, directory: directory, format: format, dustEnabled: dustEnabled, dustStrength: dustStrength, rotationDegrees: photo.previewRotationDegrees, inverted: photo.isInverted, adjustments: photo.adjustments))
+                }
             }
             DispatchQueue.main.async {
-                self.statusLabel.stringValue = "已导出 \(outputs.count) 个文件到 \(directory.path)"
+                self.statusLabel.stringValue = usesSeparateFolders
+                    ? "已将 \(outputs.count) 个文件分别导出到 \(taskIndexes.count) 个任务原文件夹。"
+                    : "已导出 \(outputs.count) 个文件到 \(snapshots[0].1.path)"
             }
         }
     }
@@ -1587,8 +2398,13 @@ final class LegacyWindowController: NSViewController {
         panel.directoryURL = exportDirectory
         if panel.runModal() == .OK, let url = panel.url {
             exportDirectory = url
-            outputLabel.stringValue = "输出：\(url.path)"
-            statusLabel.stringValue = "已选择导出文件夹。"
+            if effectiveSelectedTaskIndexes().count > 1 {
+                outputLabel.stringValue = "输出：多选任务分别输出到各自原文件夹"
+                statusLabel.stringValue = "已保存单任务导出路径；当前多选任务仍会分别导出到各自原文件夹。"
+            } else {
+                outputLabel.stringValue = "输出：\(url.path)"
+                statusLabel.stringValue = "已选择导出文件夹。"
+            }
         }
     }
 
@@ -1612,15 +2428,16 @@ final class LegacyWindowController: NSViewController {
         dustStrengthLabel.stringValue = "强度 \(Int(dustRemovalStrength))"
     }
 
-    @objc private func zoomIn() { canvas.zoom *= 1.2 }
-    @objc private func zoomOut() { canvas.zoom = max(0.25, canvas.zoom / 1.2) }
+    @objc private func zoomIn() { canvas.adjustZoom(by: 1.2) }
+    @objc private func zoomOut() { canvas.adjustZoom(by: 1 / 1.2) }
     @objc private func resetZoom() { canvas.resetViewTransform() }
 
     private func refreshSummary() {
         let totalPhotos = tasks.reduce(0) { $0 + $1.photos.count }
         let totalCrops = tasks.reduce(0) { $0 + $1.cropCount }
         let taskText = selectedTask.map { "\($0.name) · \($0.photos.count) 张" } ?? "未导入任务"
-        cropCountLabel.stringValue = "\(tasks.count) 个任务 · \(totalPhotos) 张图片 · 当前任务 \(taskText) · 当前红框 \(canvas.crops.count) 个 · 全部红框 \(totalCrops) 个 · A 新增，S/Delete 删除，D 放大镜，滚轮缩放"
+        let selectedCount = effectiveSelectedTaskIndexes().count
+        cropCountLabel.stringValue = "\(tasks.count) 个任务（已选 \(selectedCount)）· \(totalPhotos) 张图片 · 当前任务 \(taskText) · 当前红框 \(canvas.crops.count) 个 · 全部红框 \(totalCrops) 个 · A 新增，S/Delete 删除，D 放大镜，滚轮缩放"
     }
 
     private func taskRootURL(from urls: [URL], fallback: URL) -> URL {
@@ -1650,14 +2467,29 @@ final class LegacyCanvasView: NSView {
             }
         }
     }
-    var selectedIndex: Int?
+    var selectedIndex: Int? { didSet { needsDisplay = true } }
     var previewRotationDegrees: Int = 0 { didSet { needsDisplay = true } }
     var isInverted: Bool = false {
         didSet {
             if isInverted, invertedImage == nil {
                 invertedImage = Self.invertedPreview(from: image)
             }
+            displayInvertedPreviewImage = nil
             wheelInvertedPreviewImage = nil
+            adjustedImage = nil
+            adjustedInvertedImage = nil
+            needsDisplay = true
+        }
+    }
+    var adjustments = LegacyImageAdjustments() {
+        didSet {
+            adjustedImage = nil
+            adjustedInvertedImage = nil
+            displayPreviewImage = nil
+            displayInvertedPreviewImage = nil
+            wheelPreviewImage = nil
+            wheelInvertedPreviewImage = nil
+            interactionSnapshot = nil
             needsDisplay = true
         }
     }
@@ -1666,6 +2498,7 @@ final class LegacyCanvasView: NSView {
     var onCropsChanged: (() -> Void)?
     var onFileDropped: (([URL]) -> Void)?
     var onMagnifierToggled: ((Bool) -> Void)?
+    var onNudgeAll: ((CGFloat, CGFloat) -> Void)?
     var zoom: CGFloat = 1 {
         didSet {
             if !suppressZoomRedraw {
@@ -1682,6 +2515,10 @@ final class LegacyCanvasView: NSView {
 
     private var image: NSImage?
     private var invertedImage: NSImage?
+    private var adjustedImage: NSImage?
+    private var adjustedInvertedImage: NSImage?
+    private var displayPreviewImage: NSImage?
+    private var displayInvertedPreviewImage: NSImage?
     private var wheelPreviewImage: NSImage?
     private var wheelInvertedPreviewImage: NSImage?
     private var activeHandle: CropHandle?
@@ -1699,6 +2536,16 @@ final class LegacyCanvasView: NSView {
     private var isWheelZooming = false
     private var suppressZoomRedraw = false
     private var lastWheelZoomDisplayTime: TimeInterval = 0
+    private var lastPanDisplayTime: TimeInterval = 0
+    private var lastCropDisplayTime: TimeInterval = 0
+    private var pendingCropDirtyRect = CGRect.null
+    private var interactionSnapshot: NSImage?
+    private var snapshotZoom: CGFloat = 1
+    private var snapshotPanOffset = CGPoint.zero
+    private let usesMojaveRenderingPath: Bool = {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return version.majorVersion == 10 && version.minorVersion <= 14
+    }()
 
     var currentTemplateRect: CGRect? {
         selectedIndex.flatMap { crops.indices.contains($0) ? crops[$0].rect : nil } ?? crops.first?.rect
@@ -1716,9 +2563,20 @@ final class LegacyCanvasView: NSView {
         registerForDraggedTypes([.fileURL])
     }
 
-    func setImage(_ image: NSImage, crops: [LegacyCrop], rotationDegrees: Int, inverted: Bool) {
+    func setImage(
+        _ image: NSImage,
+        crops: [LegacyCrop],
+        rotationDegrees: Int,
+        inverted: Bool,
+        adjustments: LegacyImageAdjustments = LegacyImageAdjustments()
+    ) {
         self.image = image
         invertedImage = nil
+        adjustedImage = nil
+        adjustedInvertedImage = nil
+        self.adjustments = adjustments
+        displayPreviewImage = nil
+        displayInvertedPreviewImage = nil
         wheelPreviewImage = nil
         wheelInvertedPreviewImage = nil
         self.crops = crops
@@ -1728,31 +2586,89 @@ final class LegacyCanvasView: NSView {
         panOffset = .zero
         magnifierPoint = nil
         lastMagnifierFrame = .null
+        pendingCropDirtyRect = .null
         needsDisplay = true
+    }
+
+    func makeAutomaticAdjustments() -> LegacyImageAdjustments? {
+        guard let image else { return nil }
+        return LegacyAutoColorAnalyzer.adjustments(for: image, inverted: isInverted)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         backgroundColor.setFill()
         dirtyRect.fill()
+        if usesMojaveRenderingPath,
+           let interactionSnapshot,
+           isWheelZooming || isPanning {
+            let scale = max(0.01, zoom / max(snapshotZoom, 0.01))
+            let center = CGPoint(
+                x: bounds.midX + snapshotPanOffset.x,
+                y: bounds.midY + snapshotPanOffset.y
+            )
+            let translatedCenter = CGPoint(
+                x: center.x + panOffset.x - snapshotPanOffset.x,
+                y: center.y + panOffset.y - snapshotPanOffset.y
+            )
+            let destination = CGRect(
+                x: translatedCenter.x - (center.x - bounds.minX) * scale,
+                y: translatedCenter.y - (center.y - bounds.minY) * scale,
+                width: bounds.width * scale,
+                height: bounds.height * scale
+            )
+            NSGraphicsContext.current?.imageInterpolation = .low
+            interactionSnapshot.draw(in: destination, from: .zero, operation: .copy, fraction: 1)
+            return
+        }
         guard let image else { return }
-        let displayImage = isInverted ? (invertedImage ?? image) : image
-        let drawnImage = isWheelZooming ? wheelPreview(for: displayImage, inverted: isInverted) : displayImage
+        let displayImage = processedImage(from: image, inverted: isInverted)
+        let usesFastInteractionPreview = isWheelZooming || isPanning
+        let drawnImage: NSImage
+        if usesFastInteractionPreview {
+            drawnImage = wheelPreview(for: displayImage, inverted: isInverted)
+        } else if usesMojaveRenderingPath {
+            drawnImage = settledPreview(for: displayImage, inverted: isInverted)
+        } else {
+            drawnImage = displayImage
+        }
         let rect = imageContentRect()
-        NSGraphicsContext.current?.imageInterpolation = isWheelZooming ? .low : .high
+        NSGraphicsContext.current?.imageInterpolation = usesFastInteractionPreview ? .low : .high
         NSGraphicsContext.current?.saveGraphicsState()
         imageTransform(for: rect).concat()
         drawnImage.draw(in: rect)
-        NSColor.red.setStroke()
         for (index, crop) in crops.enumerated() {
             let r = viewRect(from: crop.rect, imageRect: rect)
             let path = rotatedRectPath(rect: r, angle: crop.angle)
-            path.lineWidth = index == selectedIndex ? 0.9 : 0.6
+            if index == selectedIndex {
+                NSColor(calibratedRed: 0.82, green: 0.50, blue: 0.00, alpha: 1).setStroke()
+            } else {
+                NSColor(calibratedRed: 1.0, green: 0.76, blue: 0.06, alpha: 1).setStroke()
+            }
+            path.lineWidth = 1.35
             path.stroke()
         }
         NSGraphicsContext.current?.restoreGraphicsState()
         if isMagnifierEnabled, let magnifierPoint, let activeIndex, crops.indices.contains(activeIndex) {
             drawMagnifier(sourcePoint: magnifierPoint, imageRect: rect, displayImage: displayImage, activeCrop: crops[activeIndex])
         }
+    }
+
+    private func processedImage(from image: NSImage, inverted: Bool) -> NSImage {
+        if inverted, let adjustedInvertedImage { return adjustedInvertedImage }
+        if !inverted, let adjustedImage { return adjustedImage }
+        let base = inverted ? (invertedImage ?? image) : image
+        guard adjustments.isActive,
+              let cgImage = base.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let output = LegacyToneMapper.adjustedImage(cgImage, adjustments: adjustments) else {
+            return base
+        }
+        let result = NSImage(cgImage: output, size: base.size)
+        if inverted {
+            adjustedInvertedImage = result
+        } else {
+            adjustedImage = result
+        }
+        return result
     }
 
     private func wheelPreview(for image: NSImage, inverted: Bool) -> NSImage {
@@ -1762,13 +2678,66 @@ final class LegacyCanvasView: NSView {
         if !inverted, let wheelPreviewImage {
             return wheelPreviewImage
         }
-        let preview = Self.downsampledPreview(from: image, maxPixelSize: 2200) ?? image
+        let preview = Self.downsampledPreview(
+            from: image,
+            maxPixelSize: usesMojaveRenderingPath ? 1200 : 1800
+        ) ?? image
         if inverted {
             wheelInvertedPreviewImage = preview
         } else {
             wheelPreviewImage = preview
         }
         return preview
+    }
+
+    private func settledPreview(for image: NSImage, inverted: Bool) -> NSImage {
+        if inverted, let displayInvertedPreviewImage {
+            return displayInvertedPreviewImage
+        }
+        if !inverted, let displayPreviewImage {
+            return displayPreviewImage
+        }
+        let preview = Self.downsampledPreview(from: image, maxPixelSize: 2800) ?? image
+        if inverted {
+            displayInvertedPreviewImage = preview
+        } else {
+            displayPreviewImage = preview
+        }
+        return preview
+    }
+
+    private func beginMojaveInteractionSnapshotIfNeeded() {
+        guard usesMojaveRenderingPath,
+              interactionSnapshot == nil,
+              bounds.width > 1,
+              bounds.height > 1 else { return }
+        let width = max(1, Int(bounds.width.rounded(.up)))
+        let height = max(1, Int(bounds.height.rounded(.up)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: false,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: width * 4,
+            bitsPerPixel: 32
+        ) else { return }
+        bitmap.size = bounds.size
+        cacheDisplay(in: bounds, to: bitmap)
+        let snapshot = NSImage(size: bounds.size)
+        snapshot.addRepresentation(bitmap)
+        interactionSnapshot = snapshot
+        snapshotZoom = zoom
+        snapshotPanOffset = panOffset
+    }
+
+    private func endMojaveInteractionSnapshot() {
+        interactionSnapshot = nil
+        snapshotZoom = zoom
+        snapshotPanOffset = panOffset
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1791,9 +2760,11 @@ final class LegacyCanvasView: NSView {
         }
         selectedIndex = nil
         if image != nil, imageDisplayRect().contains(rawPoint) {
+            beginMojaveInteractionSnapshotIfNeeded()
             isPanning = true
             startPoint = rawPoint
             startPanOffset = panOffset
+            lastPanDisplayTime = 0
             NSCursor.closedHand.set()
         }
         needsDisplay = true
@@ -1806,7 +2777,11 @@ final class LegacyCanvasView: NSView {
                 x: startPanOffset.x + point.x - startPoint.x,
                 y: startPanOffset.y + point.y - startPoint.y
             )
-            needsDisplay = true
+            let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+            if event.timestamp - lastPanDisplayTime >= frameInterval {
+                lastPanDisplayTime = event.timestamp
+                needsDisplay = true
+            }
             return
         }
         guard let activeIndex, crops.indices.contains(activeIndex), let activeHandle else { return }
@@ -1830,7 +2805,14 @@ final class LegacyCanvasView: NSView {
             lastMagnifierFrame = .null
         }
         let newDirty = cropDirtyRect(crops[activeIndex], imageRect: imgRect).union(newLens)
-        setNeedsDisplay(oldDirty.union(newDirty).insetBy(dx: -8, dy: -8))
+        let dirty = oldDirty.union(newDirty).insetBy(dx: -8, dy: -8)
+        pendingCropDirtyRect = pendingCropDirtyRect.isNull ? dirty : pendingCropDirtyRect.union(dirty)
+        let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+        if event.timestamp - lastCropDisplayTime >= frameInterval {
+            lastCropDisplayTime = event.timestamp
+            setNeedsDisplay(pendingCropDirtyRect)
+            pendingCropDirtyRect = .null
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1847,11 +2829,44 @@ final class LegacyCanvasView: NSView {
         }
         lastMagnifierFrame = .null
         isPanning = false
+        endMojaveInteractionSnapshot()
+        lastPanDisplayTime = 0
+        lastCropDisplayTime = 0
+        if !pendingCropDirtyRect.isNull {
+            setNeedsDisplay(pendingCropDirtyRect)
+            pendingCropDirtyRect = .null
+        }
+        needsDisplay = true
         NSCursor.arrow.set()
     }
 
     override func keyDown(with event: NSEvent) {
         let key = event.charactersIgnoringModifiers?.lowercased()
+        let moveAll = event.modifierFlags.contains(.command)
+        let nudge: (CGFloat, CGFloat) -> Void = { [weak self] dx, dy in
+            guard let self else { return }
+            if moveAll {
+                self.onNudgeAll?(dx, dy)
+            } else {
+                _ = self.nudgeSelectedCrop(dx: dx, dy: dy)
+            }
+        }
+        switch event.keyCode {
+        case 123:
+            nudge(-0.001, 0)
+            return
+        case 124:
+            nudge(0.001, 0)
+            return
+        case 125:
+            nudge(0, -0.001)
+            return
+        case 126:
+            nudge(0, 0.001)
+            return
+        default:
+            break
+        }
         if key == "d" {
             isMagnifierEnabled.toggle()
             onMagnifierToggled?(isMagnifierEnabled)
@@ -1868,23 +2883,35 @@ final class LegacyCanvasView: NSView {
         }
     }
 
-    private func deleteSelectedCrop() {
-        guard let selectedIndex, crops.indices.contains(selectedIndex), crops.count > 1 else { return }
+    func deleteSelectedCrop() {
+        guard let selectedIndex, crops.indices.contains(selectedIndex) else { return }
         crops.remove(at: selectedIndex)
-        self.selectedIndex = crops.indices.contains(selectedIndex) ? selectedIndex : crops.indices.last
+        self.selectedIndex = crops.isEmpty ? nil : (crops.indices.contains(selectedIndex) ? selectedIndex : crops.indices.last)
         onCropsChanged?()
         needsDisplay = true
+    }
+
+    @discardableResult
+    func nudgeSelectedCrop(dx: CGFloat, dy: CGFloat) -> Bool {
+        guard let selectedIndex, crops.indices.contains(selectedIndex) else { return false }
+        crops[selectedIndex].rect = crops[selectedIndex].rect.offsetBy(dx: dx, dy: dy).normalized
+        onCropChanged?(crops[selectedIndex].rect)
+        onCropsChanged?()
+        needsDisplay = true
+        return true
     }
 
     override func scrollWheel(with event: NSEvent) {
         let delta = event.scrollingDeltaY == 0 ? event.scrollingDeltaX : event.scrollingDeltaY
         guard delta != 0 else { return }
+        beginMojaveInteractionSnapshotIfNeeded()
         isWheelZooming = true
-        let factor = pow(CGFloat(1.0018), -delta)
+        let factor = pow(CGFloat(1.0018), delta)
         suppressZoomRedraw = true
         zoom = min(8, max(0.25, zoom * factor))
         suppressZoomRedraw = false
-        if event.timestamp - lastWheelZoomDisplayTime > 0.024 {
+        let frameInterval = usesMojaveRenderingPath ? 1.0 / 40.0 : 1.0 / 60.0
+        if event.timestamp - lastWheelZoomDisplayTime >= frameInterval {
             lastWheelZoomDisplayTime = event.timestamp
             needsDisplay = true
         }
@@ -1894,11 +2921,25 @@ final class LegacyCanvasView: NSView {
 
     @objc private func finishWheelZoom() {
         isWheelZooming = false
+        endMojaveInteractionSnapshot()
         lastWheelZoomDisplayTime = 0
         needsDisplay = true
     }
 
+    func adjustZoom(by factor: CGFloat) {
+        guard factor > 0 else { return }
+        beginMojaveInteractionSnapshotIfNeeded()
+        isWheelZooming = true
+        suppressZoomRedraw = true
+        zoom = min(8, max(0.25, zoom * factor))
+        suppressZoomRedraw = false
+        needsDisplay = true
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(finishWheelZoom), object: nil)
+        perform(#selector(finishWheelZoom), with: nil, afterDelay: 0.10)
+    }
+
     func resetViewTransform() {
+        endMojaveInteractionSnapshot()
         zoom = 1
         panOffset = .zero
         needsDisplay = true
@@ -2098,9 +3139,9 @@ final class LegacyCanvasView: NSView {
             width: cropViewRect.width / imageRect.width * displayImage.size.width * scaleX,
             height: cropViewRect.height / imageRect.height * displayImage.size.height * scaleY
         )
-        NSColor.red.setStroke()
+        NSColor(calibratedRed: 0.82, green: 0.50, blue: 0.00, alpha: 1).setStroke()
         let cropPath = rotatedRectPath(rect: cropLensRect, angle: activeCrop.angle)
-        cropPath.lineWidth = 1.0
+        cropPath.lineWidth = 1.35
         cropPath.stroke()
         NSGraphicsContext.current?.restoreGraphicsState()
 
@@ -2218,6 +3259,113 @@ enum CropHandle {
     }
 }
 
+enum LegacyAutoColorAnalyzer {
+    static func adjustments(for image: NSImage, inverted: Bool) -> LegacyImageAdjustments? {
+        guard let preview = downsample(image, maxPixelSize: 900),
+              let cgImage = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else { return nil }
+
+        var histogram = [Int](repeating: 0, count: 256)
+        var redTotal = 0.0
+        var greenTotal = 0.0
+        var blueTotal = 0.0
+        var neutralCount = 0.0
+        let insetX = max(1, width / 50)
+        let insetY = max(1, height / 50)
+        for y in stride(from: insetY, to: max(insetY + 1, height - insetY), by: 2) {
+            for x in stride(from: insetX, to: max(insetX + 1, width - insetX), by: 2) {
+                let offset = y * bytesPerRow + x * 4
+                let red = inverted ? 255 - Int(pixels[offset]) : Int(pixels[offset])
+                let green = inverted ? 255 - Int(pixels[offset + 1]) : Int(pixels[offset + 1])
+                let blue = inverted ? 255 - Int(pixels[offset + 2]) : Int(pixels[offset + 2])
+                let luminance = min(255, max(0, Int(0.2126 * Double(red) + 0.7152 * Double(green) + 0.0722 * Double(blue))))
+                histogram[luminance] += 1
+                if luminance > 18 && luminance < 240 {
+                    redTotal += Double(red)
+                    greenTotal += Double(green)
+                    blueTotal += Double(blue)
+                    neutralCount += 1
+                }
+            }
+        }
+        let sampleCount = histogram.reduce(0, +)
+        guard sampleCount > 100, neutralCount > 20 else { return nil }
+        let low = percentile(histogram, fraction: 0.005)
+        let high = percentile(histogram, fraction: 0.995)
+        guard high > low + 8 else { return nil }
+        let median = percentile(histogram, fraction: 0.5)
+        let normalizedMedian = min(0.9, max(0.1, Double(median - low) / Double(high - low)))
+        let gamma = min(2.2, max(0.55, log(normalizedMedian) / log(0.5)))
+
+        let redMean = redTotal / neutralCount
+        let greenMean = greenTotal / neutralCount
+        let blueMean = blueTotal / neutralCount
+        let target = (redMean + greenMean + blueMean) / 3
+        var result = LegacyImageAdjustments()
+        result.levelsEnabled = true
+        result.inputBlack = Double(low) / 255
+        result.inputWhite = Double(high) / 255
+        result.gamma = gamma
+        result.redGain = min(1.35, max(0.74, target / max(1, redMean)))
+        result.greenGain = min(1.35, max(0.74, target / max(1, greenMean)))
+        result.blueGain = min(1.35, max(0.74, target / max(1, blueMean)))
+        return result
+    }
+
+    private static func percentile(_ histogram: [Int], fraction: Double) -> Int {
+        let target = Int(Double(histogram.reduce(0, +)) * fraction)
+        var running = 0
+        for (index, count) in histogram.enumerated() {
+            running += count
+            if running >= target { return index }
+        }
+        return histogram.count - 1
+    }
+
+    private static func downsample(_ image: NSImage, maxPixelSize: Int) -> NSImage? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let longest = max(cgImage.width, cgImage.height)
+        guard longest > maxPixelSize else { return image }
+        let scale = Double(maxPixelSize) / Double(longest)
+        let width = max(1, Int(Double(cgImage.width) * scale))
+        let height = max(1, Int(Double(cgImage.height) * scale))
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let output = context.makeImage() else { return nil }
+        return NSImage(cgImage: output, size: NSSize(width: width, height: height))
+    }
+}
+
 enum LegacyToneMapper {
     static func adjustedImage(_ image: CGImage, adjustments: LegacyImageAdjustments) -> CGImage? {
         guard adjustments.isActive else { return image }
@@ -2246,11 +3394,13 @@ enum LegacyToneMapper {
             return true
         }
         guard drew else { return nil }
-        let lut = makeLUT8(adjustments: adjustments)
+        let redLUT = makeLUT8(adjustments: adjustments, gain: adjustments.redGain)
+        let greenLUT = makeLUT8(adjustments: adjustments, gain: adjustments.greenGain)
+        let blueLUT = makeLUT8(adjustments: adjustments, gain: adjustments.blueGain)
         for index in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
-            pixels[index] = lut[Int(pixels[index])]
-            pixels[index + 1] = lut[Int(pixels[index + 1])]
-            pixels[index + 2] = lut[Int(pixels[index + 2])]
+            pixels[index] = redLUT[Int(pixels[index])]
+            pixels[index + 1] = greenLUT[Int(pixels[index + 1])]
+            pixels[index + 2] = blueLUT[Int(pixels[index + 2])]
         }
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow, space: colorSpace, bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo), provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
@@ -2259,23 +3409,27 @@ enum LegacyToneMapper {
     private static func adjusted16BitRGBImage(_ image: CGImage, adjustments: LegacyImageAdjustments) -> CGImage? {
         guard var pixels = compact16BitRGBPixels(from: image) else { return nil }
         let littleEndian = image.bitmapInfo.rawValue & CGBitmapInfo.byteOrder16Little.rawValue != 0
-        let lut = makeLUT16(adjustments: adjustments)
+        let luts = [
+            makeLUT16(adjustments: adjustments, gain: adjustments.redGain),
+            makeLUT16(adjustments: adjustments, gain: adjustments.greenGain),
+            makeLUT16(adjustments: adjustments, gain: adjustments.blueGain)
+        ]
         for offset in stride(from: 0, to: pixels.count, by: 2) {
             let value = Int(readUInt16(pixels, offset: offset, littleEndian: littleEndian))
-            writeUInt16(lut[value], pixels: &pixels, offset: offset, littleEndian: littleEndian)
+            writeUInt16(luts[(offset / 2) % 3][value], pixels: &pixels, offset: offset, littleEndian: littleEndian)
         }
         return make16BitRGBImage(width: image.width, height: image.height, pixels: pixels, colorSpace: image.colorSpace, bitmapInfo: image.bitmapInfo)
     }
 
-    private static func makeLUT8(adjustments: LegacyImageAdjustments) -> [UInt8] {
+    private static func makeLUT8(adjustments: LegacyImageAdjustments, gain: Double) -> [UInt8] {
         (0...255).map { value in
-            UInt8(clamping: Int(round(mappedValue(Double(value) / 255, adjustments: adjustments) * 255)))
+            UInt8(clamping: Int(round(mappedValue(Double(value) / 255 * gain, adjustments: adjustments) * 255)))
         }
     }
 
-    private static func makeLUT16(adjustments: LegacyImageAdjustments) -> [UInt16] {
+    private static func makeLUT16(adjustments: LegacyImageAdjustments, gain: Double) -> [UInt16] {
         (0...65535).map { value in
-            UInt16(clamping: Int(round(mappedValue(Double(value) / 65535, adjustments: adjustments) * 65535)))
+            UInt16(clamping: Int(round(mappedValue(Double(value) / 65535 * gain, adjustments: adjustments) * 65535)))
         }
     }
 
@@ -2410,6 +3564,17 @@ enum LegacyToneMapper {
 }
 
 enum LegacyImageIO {
+    static func pixelSize(url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(
+            url as CFURL,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ),
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+        let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { return nil }
+        return CGSize(width: width.doubleValue, height: height.doubleValue)
+    }
+
     static func thumbnail(url: URL, maxPixelSize: Int) -> NSImage? {
         if let decoder = FFFParsingRuntime.decoder(for: url),
            let cgImage = decoder.makePreviewCGImage(maxPixelSize: maxPixelSize) {
@@ -2447,6 +3612,100 @@ enum LegacyImageIO {
 }
 
 enum LegacyFrameDetector {
+    static func insetAdaptiveRects(_ rects: [CGRect], fraction: CGFloat = 0.018) -> [CGRect] {
+        let effectiveFraction = isFourFrame120HorizontalLayout(rects) ? CGFloat(0.006) : fraction
+        return rects
+            .map { rect -> CGRect in
+                let normalized = rect.normalized
+                let insetX = max(0.0006, normalized.width * effectiveFraction)
+                let insetY = max(0.0006, normalized.height * effectiveFraction)
+                guard normalized.width > insetX * 2.5, normalized.height > insetY * 2.5 else { return normalized }
+                return normalized.insetBy(dx: insetX, dy: insetY).normalized
+            }
+            .sortedForReadingOrder()
+    }
+
+    private static func isFourFrame120HorizontalLayout(_ rects: [CGRect]) -> Bool {
+        guard rects.count == 4 else { return false }
+        let normalized = rects.map { $0.normalized }.sorted { $0.midX < $1.midX }
+        let medianWidth = median(normalized.map { Double($0.width) })
+        let medianHeight = median(normalized.map { Double($0.height) })
+        guard medianWidth >= 0.15,
+              medianWidth <= 0.28,
+              medianHeight >= 0.72,
+              medianHeight <= 0.94 else { return false }
+        let midYSpread = normalized.map(\.midY).max()! - normalized.map(\.midY).min()!
+        guard midYSpread <= 0.035 else { return false }
+        return normalized.allSatisfy { rect in
+            Double(rect.width) >= medianWidth * 0.78 &&
+                Double(rect.width) <= medianWidth * 1.22 &&
+                Double(rect.height) >= medianHeight * 0.96 &&
+                Double(rect.height) <= medianHeight * 1.04
+        }
+    }
+
+    static func insetAdaptiveResult(_ result: LegacyDetectionResult) -> LegacyDetectionResult {
+        let candidates = result.candidates.map { candidate in
+            LegacyDetectionCandidate(
+                title: candidate.title,
+                detail: candidate.detail + " · 边界内收",
+                rects: insetAdaptiveRects(candidate.rects),
+                score: candidate.score
+            )
+        }
+        return LegacyDetectionResult(
+            crops: insetAdaptiveRects(result.crops.map(\.rect)).map { LegacyCrop(rect: $0) },
+            candidates: candidates
+        )
+    }
+
+    static func hasStandardTwoBySixResolution(_ url: URL) -> Bool {
+        guard let size = LegacyImageIO.pixelSize(url: url) else { return false }
+        let references = [
+            CGSize(width: 14_715, height: 3_996),
+            CGSize(width: 22_077, height: 5_995)
+        ]
+        return references.contains { reference in
+            abs(size.width - reference.width) / reference.width <= 0.08 &&
+                abs(size.height - reference.height) / reference.height <= 0.08
+        }
+    }
+
+    static func isStandardTwoBySixFile(_ url: URL, detectedRects: [CGRect]) -> Bool {
+        hasStandardTwoBySixResolution(url) || isStandardTwoBySixLayout(detectedRects)
+    }
+
+    static func isStandardTwoBySixLayout(_ rects: [CGRect]) -> Bool {
+        guard rects.count == 12 else { return false }
+        let normalized = rects.map { $0.normalized }.sorted { $0.midY < $1.midY }
+        let firstRow = Array(normalized.prefix(6)).sorted { $0.midX < $1.midX }
+        let secondRow = Array(normalized.suffix(6)).sorted { $0.midX < $1.midX }
+        let medianWidth = median(normalized.map { Double($0.width) })
+        let medianHeight = median(normalized.map { Double($0.height) })
+        guard medianWidth > 0.02, medianHeight > 0.02 else { return false }
+
+        func rowIsRegular(_ row: [CGRect]) -> Bool {
+            let centerY = row.reduce(CGFloat(0)) { $0 + $1.midY } / CGFloat(row.count)
+            guard row.allSatisfy({ abs($0.midY - centerY) <= CGFloat(medianHeight * 0.42) }) else { return false }
+            guard row.allSatisfy({
+                let widthRatio = Double($0.width) / medianWidth
+                let heightRatio = Double($0.height) / medianHeight
+                return widthRatio >= 0.62 && widthRatio <= 1.55 && heightRatio >= 0.68 && heightRatio <= 1.45
+            }) else { return false }
+            return zip(row, row.dropFirst()).allSatisfy { left, right in
+                right.midX > left.midX && right.minX >= left.minX + left.width * 0.45
+            }
+        }
+
+        guard rowIsRegular(firstRow), rowIsRegular(secondRow) else { return false }
+        let firstCenterY = firstRow.reduce(CGFloat(0)) { $0 + $1.midY } / 6
+        let secondCenterY = secondRow.reduce(CGFloat(0)) { $0 + $1.midY } / 6
+        guard secondCenterY - firstCenterY >= CGFloat(medianHeight * 0.58) else { return false }
+        return zip(firstRow, secondRow).allSatisfy { upper, lower in
+            abs(upper.midX - lower.midX) <= CGFloat(medianWidth * 0.70)
+        }
+    }
+
     static func anchorAlignedCrops(url: URL, sourceCrops: [LegacyCrop], anchor: CGRect) -> [LegacyCrop] {
         guard !sourceCrops.isEmpty else { return [] }
         let detected = detectBestTemplateCrops(url: url, template: anchor)
@@ -2475,6 +3734,7 @@ enum LegacyFrameDetector {
 
     private static func detectBestCropsWithReport(url: URL, template: CGRect?) -> LegacyDetectionResult {
         var candidates: [LegacyDetectionCandidate] = []
+        var deferredSingleCandidate: LegacyDetectionCandidate?
         let analysis = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096)
         if let gray = analysis {
             let luminances = gray.bytes.map { Double($0) / 255.0 }
@@ -2483,16 +3743,11 @@ enum LegacyFrameDetector {
                 width: gray.width,
                 height: gray.height
             ) {
-                let displayRect = rasterRectToDisplayRect(singleRect)
-                let candidate = LegacyDetectionCandidate(
+                deferredSingleCandidate = LegacyDetectionCandidate(
                     title: "单张完整片框",
                     detail: "单幅扫描，按底片外边界识别一个画面",
-                    rects: [displayRect],
-                    score: min(1, scoreCandidate([singleRect], expectedCount: 1) + 0.70)
-                )
-                return LegacyDetectionResult(
-                    crops: [LegacyCrop(rect: displayRect)],
-                    candidates: [candidate]
+                    rects: [singleRect],
+                    score: min(1, scoreCandidate([singleRect], expectedCount: 1) + 0.25)
                 )
             }
             let strictRects = detectTwoRowSixFrameRects(luminances: luminances, width: gray.width, height: gray.height)
@@ -2510,7 +3765,7 @@ enum LegacyFrameDetector {
         let negativeRects = detectNegativeFilmRects(url: url)
         if !negativeRects.isEmpty {
             let isCompleteTwoBySix = negativeRects.count == 12 && hasCompleteTwoRowSixCoverage(negativeRects)
-            let partialStripBonus = negativeRects.count >= 3 && negativeRects.count < 12 ? 0.34 : 0
+            let partialStripBonus = negativeRects.count >= 2 && negativeRects.count < 12 ? 0.34 : 0
             candidates.append(LegacyDetectionCandidate(
                 title: isCompleteTwoBySix ? "浅色/黑色片距" : "按实际张数识别",
                 detail: isCompleteTwoBySix ? "完整 2×6 负片胶片片距检测" : "不补齐空位，按实际可见画面检测",
@@ -2520,6 +3775,9 @@ enum LegacyFrameDetector {
                     expectedCount: isCompleteTwoBySix ? 12 : nil
                 ) + partialStripBonus
             ))
+        }
+        if negativeRects.count < 2, let deferredSingleCandidate {
+            candidates.append(deferredSingleCandidate)
         }
         if let template {
             let templateCrops = detectTemplatePositionCrops(url: url, template: template)
@@ -2696,6 +3954,16 @@ enum LegacyFrameDetector {
         guard filmWidth >= Int(Double(width) * 0.55),
               filmWidth <= Int(Double(width) * 0.98) else { return [] }
 
+        if let recovered = recoverThreeFrame120VerticalStrip(
+            luminances: luminances,
+            width: width,
+            height: height,
+            xStart: xStart,
+            xEnd: xEnd
+        ) {
+            return recovered
+        }
+
         var rowBody = [Double](repeating: 0, count: height)
         var rowBlack = [Double](repeating: 0, count: height)
         for y in 0..<height {
@@ -2764,6 +4032,157 @@ enum LegacyFrameDetector {
                 height: height
             )
         }
+    }
+
+    private static func recoverThreeFrame120VerticalStrip(
+        luminances: [Double],
+        width: Int,
+        height: Int,
+        xStart: Int,
+        xEnd: Int
+    ) -> [CGRect]? {
+        let filmWidth = max(1, xEnd - xStart)
+        let stripAspect = Double(height) / Double(width)
+        guard stripAspect >= 2.45, stripAspect <= 3.65 else { return nil }
+
+        var rowBlack = [Double](repeating: 0, count: height)
+        var rowUltraBlack = [Double](repeating: 0, count: height)
+        var rowNonWhite = [Double](repeating: 0, count: height)
+        for y in 0..<height {
+            var black = 0
+            var ultraBlack = 0
+            var nonWhite = 0
+            for x in xStart..<xEnd {
+                let value = luminances[y * width + x]
+                if value <= 0.10 { black += 1 }
+                if value <= 0.005 { ultraBlack += 1 }
+                if value < 0.985 { nonWhite += 1 }
+            }
+            rowBlack[y] = Double(black) / Double(filmWidth)
+            rowUltraBlack[y] = Double(ultraBlack) / Double(filmWidth)
+            rowNonWhite[y] = Double(nonWhite) / Double(filmWidth)
+        }
+
+        let activeRows = movingAverage(rowNonWhite, window: max(3, height / 650))
+            .enumerated()
+            .compactMap { index, value in value >= 0.18 ? index : nil }
+        guard let filmTop = activeRows.first,
+              let filmBottomValue = activeRows.last,
+              filmBottomValue > filmTop else { return nil }
+        let filmBottom = min(height, filmBottomValue + 1)
+
+        let smoothedBlack = movingAverage(rowBlack, window: max(3, height / 700))
+        let smoothedUltraBlack = movingAverage(rowUltraBlack, window: max(3, height / 700))
+        let ultraGaps = mergeCloseSegments(
+            thresholdSegments(
+                values: smoothedUltraBlack,
+                threshold: 0.55,
+                minimumSize: max(3, height / 760),
+                lessThan: false
+            ),
+            maxGap: max(2, height / 900)
+        ).filter { gap in
+            gap.end > filmTop && gap.start < filmBottom
+                && gap.size <= max(28, filmWidth / 3)
+                && segmentMean(smoothedUltraBlack, gap) >= 0.62
+        }
+        let rawGaps = thresholdSegments(
+            values: smoothedBlack,
+            threshold: 0.58,
+            minimumSize: max(3, height / 760),
+            lessThan: false
+        )
+        let regularGaps = mergeCloseSegments(rawGaps, maxGap: max(2, height / 900))
+            .filter { gap in
+                gap.end > filmTop && gap.start < filmBottom
+                    && gap.size <= max(28, filmWidth / 3)
+                    && segmentMean(smoothedBlack, gap) >= 0.62
+            }
+            .sorted { $0.start < $1.start }
+        let gaps = (ultraGaps.count >= 2 ? ultraGaps : regularGaps)
+            .sorted { $0.start < $1.start }
+        guard gaps.count >= 2 else { return nil }
+
+        let expectedFrameHeight = Double(filmWidth)
+        let minimumFrameHeight = max(40, Int(expectedFrameHeight * 0.62))
+        let maximumFrameHeight = max(minimumFrameHeight + 1, Int(expectedFrameHeight * 1.30))
+
+        var bestRects: [CGRect]?
+        var bestScore = -Double.infinity
+        for firstGapIndex in 0..<(gaps.count - 1) {
+            let firstGap = gaps[firstGapIndex]
+            let secondGap = gaps[firstGapIndex + 1]
+            guard secondGap.start > firstGap.end else { continue }
+
+            let followingGap = gaps.dropFirst(firstGapIndex + 2).first { gap in
+                gap.start - secondGap.end >= minimumFrameHeight
+            }
+            let thirdBottom = followingGap?.start ?? filmBottom
+            let slots = [
+                IntSegment(start: filmTop, end: firstGap.start),
+                IntSegment(start: firstGap.end, end: secondGap.start),
+                IntSegment(start: secondGap.end, end: thirdBottom)
+            ]
+            guard slots.allSatisfy({ $0.size >= minimumFrameHeight && $0.size <= maximumFrameHeight }) else { continue }
+
+            let heights = slots.map { Double($0.size) }
+            let medianHeight = median(heights)
+            guard medianHeight > 0,
+                  heights.allSatisfy({ $0 / medianHeight >= 0.78 && $0 / medianHeight <= 1.22 }) else { continue }
+
+            let gapDarkness = (segmentMean(smoothedBlack, firstGap) + segmentMean(smoothedBlack, secondGap)) / 2
+            let heightScore = 1.0 - min(1.0, abs(medianHeight - expectedFrameHeight) / max(1.0, expectedFrameHeight))
+            let score = heightScore * 0.72 + gapDarkness * 0.28
+            guard score > bestScore else { continue }
+
+            let rects = slots.map { slot -> CGRect in
+                let verticalPadding = max(2, min(slot.size / 140, height / 1200))
+                let top = min(slot.end - 1, slot.start + verticalPadding)
+                let bottom = max(top + 1, slot.end - verticalPadding)
+                return CGRect(
+                    x: Double(xStart) / Double(width),
+                    y: Double(top) / Double(height),
+                    width: Double(filmWidth) / Double(width),
+                    height: Double(bottom - top) / Double(height)
+                ).normalized
+            }
+            let normalized = rects.map { $0.normalized }
+            guard normalized.count == 3,
+                  normalized.allSatisfy({ rect in
+                      let aspect = rect.width / max(rect.height, 0.001)
+                      return rect.width > 0.50 && rect.height > 0.18 && aspect >= 2.45 && aspect <= 3.75
+                  }) else { continue }
+
+            bestScore = score
+            bestRects = normalized.sortedForReadingOrder()
+        }
+
+        if bestRects == nil {
+            let span = filmBottom - filmTop
+            let frameHeight = min(Double(filmWidth) * 1.06, Double(span) / 3.0)
+            guard frameHeight >= Double(filmWidth) * 0.78,
+                  frameHeight <= Double(filmWidth) * 1.16 else { return nil }
+            let extra = max(0, Double(span) - frameHeight * 3.0)
+            let gap = extra / 3.0
+            let regularRects = (0..<3).compactMap { index -> CGRect? in
+                let rawTop = Double(filmTop) + Double(index) * (frameHeight + gap)
+                let rawBottom = rawTop + frameHeight
+                let top = Int(round(rawTop)) + max(2, min(Int(frameHeight) / 160, height / 1400))
+                let bottom = Int(round(rawBottom)) - max(2, min(Int(frameHeight) / 160, height / 1400))
+                guard bottom > top else { return nil }
+                return CGRect(
+                    x: Double(xStart) / Double(width),
+                    y: Double(top) / Double(height),
+                    width: Double(filmWidth) / Double(width),
+                    height: Double(bottom - top) / Double(height)
+                ).normalized
+            }
+            if regularRects.count == 3 {
+                bestRects = regularRects.sortedForReadingOrder()
+            }
+        }
+
+        return bestRects
     }
 
     private static func detectSingleFrameRect(luminances: [Double], width: Int, height: Int) -> CGRect? {
@@ -2887,6 +4306,22 @@ enum LegacyFrameDetector {
     private static func detectHorizontalNegativeFilmRects(luminances: [Double], width: Int, height: Int) -> [CGRect] {
         guard width > height, width > 220, height > 120 else { return [] }
 
+        if let recovered = recoverFourFrame120HorizontalStrip(
+            luminances: luminances,
+            width: width,
+            height: height
+        ) {
+            return recovered
+        }
+
+        if let recovered = recoverTwoFrameHorizontalStrip(
+            luminances: luminances,
+            width: width,
+            height: height
+        ) {
+            return recovered
+        }
+
         var rowActivity = [Double](repeating: 0, count: height)
         for y in 0..<height {
             var body = 0
@@ -2935,6 +4370,179 @@ enum LegacyFrameDetector {
                 && !(rect.width > 0.92 && rect.height > 0.70)
         }
         return keepConsistentNegativeFrames(filtered).sortedForReadingOrder()
+    }
+
+    private static func recoverFourFrame120HorizontalStrip(luminances: [Double], width: Int, height: Int) -> [CGRect]? {
+        let aspect = Double(width) / Double(height)
+        guard aspect >= 2.70, aspect <= 3.45 else { return nil }
+
+        var activeRows: [Int] = []
+        for y in 0..<height {
+            var nonWhite = 0
+            for x in 0..<width where luminances[y * width + x] < 0.985 {
+                nonWhite += 1
+            }
+            if Double(nonWhite) / Double(width) >= 0.10 {
+                activeRows.append(y)
+            }
+        }
+        guard let rawTop = activeRows.first,
+              let rawBottom = activeRows.last,
+              rawBottom - rawTop >= Int(Double(height) * 0.62) else { return nil }
+
+        let yStart = max(0, rawTop)
+        let yEnd = min(height, rawBottom + 1)
+        let filmHeight = max(1, yEnd - yStart)
+        var activeColumns: [Int] = []
+        var darkColumnRatios = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var nonWhite = 0
+            var dark = 0
+            for y in yStart..<yEnd {
+                let value = luminances[y * width + x]
+                if value < 0.985 { nonWhite += 1 }
+                if value <= 0.12 { dark += 1 }
+            }
+            if Double(nonWhite) / Double(filmHeight) >= 0.10 {
+                activeColumns.append(x)
+            }
+            darkColumnRatios[x] = Double(dark) / Double(filmHeight)
+        }
+        guard let filmLeft = activeColumns.first,
+              let filmRightInclusive = activeColumns.last else { return nil }
+        let filmRight = filmRightInclusive + 1
+        let filmWidth = filmRight - filmLeft
+        guard filmWidth >= Int(Double(width) * 0.84) else { return nil }
+
+        let smoothedDark = movingAverage(darkColumnRatios, window: max(3, width / 720))
+        let separators = mergeCloseSegments(
+            thresholdSegments(
+                values: smoothedDark,
+                threshold: 0.54,
+                minimumSize: max(3, width / 1100),
+                lessThan: false
+            ),
+            maxGap: max(2, width / 600)
+        ).filter { segment in
+            let relativeMid = Double(segment.mid - filmLeft) / Double(max(1, filmWidth))
+            return relativeMid > 0.10
+                && relativeMid < 0.90
+                && segment.size <= max(20, width / 10)
+        }
+
+        let expectedStep = Double(filmWidth) / 4.0
+        let matchedSeparators = (1...3).compactMap { boundaryIndex -> IntSegment? in
+            let expected = Double(filmLeft) + Double(boundaryIndex) * expectedStep
+            return separators
+                .filter { separator in
+                    abs(Double(separator.mid) - expected) <= expectedStep * 0.24
+                }
+                .max { segmentMean(smoothedDark, $0) < segmentMean(smoothedDark, $1) }
+        }
+        guard matchedSeparators.count == 3,
+              Set(matchedSeparators.map(\.mid)).count == 3 else { return nil }
+
+        let orderedSeparators = matchedSeparators.sorted { $0.mid < $1.mid }
+        var frames: [CGRect] = []
+        for index in 0..<4 {
+            let left = index == 0 ? filmLeft : orderedSeparators[index - 1].end
+            let right = index == 3 ? filmRight : orderedSeparators[index].start
+            guard right - left >= Int(Double(filmHeight) * 0.46) else { return nil }
+            let refined = refineNegativeFrameRect(
+                xStart: left,
+                xEnd: right,
+                yStart: yStart,
+                yEnd: yEnd,
+                luminances: luminances,
+                width: width,
+                height: height
+            )
+            frames.append(refined)
+        }
+
+        let normalized = frames.map { $0.normalized }
+        let widths = normalized.map { Double($0.width) }
+        let medianWidth = median(widths)
+        guard normalized.count == 4,
+              medianWidth > 0.14,
+              widths.allSatisfy({ $0 > medianWidth * 0.68 && $0 < medianWidth * 1.38 }) else { return nil }
+        return normalized.sortedForReadingOrder()
+    }
+
+    private static func recoverTwoFrameHorizontalStrip(luminances: [Double], width: Int, height: Int) -> [CGRect]? {
+        let aspect = Double(width) / Double(height)
+        guard aspect >= 2.2, aspect <= 3.3 else { return nil }
+
+        var activeRows: [Int] = []
+        for y in 0..<height {
+            var nonWhite = 0
+            for x in 0..<width where luminances[y * width + x] < 0.985 {
+                nonWhite += 1
+            }
+            if Double(nonWhite) / Double(width) >= 0.10 {
+                activeRows.append(y)
+            }
+        }
+        guard let rawTop = activeRows.first,
+              let rawBottom = activeRows.last,
+              rawBottom - rawTop >= Int(Double(height) * 0.58) else { return nil }
+
+        let yStart = max(0, rawTop)
+        let yEnd = min(height, rawBottom + 1)
+        let filmHeight = max(1, yEnd - yStart)
+        var activeColumns: [Int] = []
+        var darkColumnRatios = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var nonWhite = 0
+            var dark = 0
+            for y in yStart..<yEnd {
+                let value = luminances[y * width + x]
+                if value < 0.985 { nonWhite += 1 }
+                if value <= 0.12 { dark += 1 }
+            }
+            if Double(nonWhite) / Double(filmHeight) >= 0.10 {
+                activeColumns.append(x)
+            }
+            darkColumnRatios[x] = Double(dark) / Double(filmHeight)
+        }
+        guard let filmLeft = activeColumns.first,
+              let filmRightInclusive = activeColumns.last else { return nil }
+        let filmRight = filmRightInclusive + 1
+        let filmWidth = filmRight - filmLeft
+        guard filmWidth >= Int(Double(width) * 0.78) else { return nil }
+
+        let darkSegments = thresholdSegments(
+            values: movingAverage(darkColumnRatios, window: max(3, width / 700)),
+            threshold: 0.58,
+            minimumSize: max(3, width / 900),
+            lessThan: false
+        ).filter { segment in
+            let relativeMid = Double(segment.mid - filmLeft) / Double(max(1, filmWidth))
+            return relativeMid >= 0.34 && relativeMid <= 0.66
+                && segment.size <= max(16, width / 8)
+        }
+        guard let divider = darkSegments.max(by: { $0.size < $1.size }) else { return nil }
+
+        let leftWidth = divider.start - filmLeft
+        let rightWidth = filmRight - divider.end
+        guard leftWidth > width / 5,
+              rightWidth > width / 5,
+              Double(max(leftWidth, rightWidth)) / Double(min(leftWidth, rightWidth)) <= 1.55 else { return nil }
+
+        return [
+            CGRect(
+                x: Double(filmLeft) / Double(width),
+                y: Double(yStart) / Double(height),
+                width: Double(leftWidth) / Double(width),
+                height: Double(filmHeight) / Double(height)
+            ).normalized,
+            CGRect(
+                x: Double(divider.end) / Double(width),
+                y: Double(yStart) / Double(height),
+                width: Double(rightWidth) / Double(width),
+                height: Double(filmHeight) / Double(height)
+            ).normalized
+        ]
     }
 
     private static func horizontalFrames(in row: IntSegment, luminances: [Double], width: Int, height: Int) -> [CGRect] {
@@ -3068,6 +4676,9 @@ enum LegacyFrameDetector {
             return keepConsistentNegativeFrames(regularFrames)
         }
 
+        if frames.count >= 2, frames.count <= 4 {
+            return frames
+        }
         if !contentFrames.isEmpty, contentFrames.count <= 4 {
             return contentFrames
         }
@@ -3096,6 +4707,12 @@ enum LegacyFrameDetector {
             return separatorSlotCount
         }
         let ratio = Double(activeWidth) / Double(rowHeight)
+        if let separatorSlotCount, separatorSlotCount == 4, ratio >= 2.65, ratio <= 3.45 {
+            return 4
+        }
+        if separatorSlotCount == nil, ratio >= 2.85, ratio <= 3.35 {
+            return 4
+        }
         let estimated = Int(round(ratio / 1.55))
         if let separatorSlotCount, separatorSlotCount >= 3 && separatorSlotCount <= 12 {
             return abs(separatorSlotCount - estimated) <= 1 ? separatorSlotCount : estimated
@@ -5248,6 +6865,20 @@ private extension Array where Element == CGRect {
             }
             .flatMap { $0.sorted { $0.minX < $1.minX } }
     }
+}
+
+if let detectIndex = CommandLine.arguments.firstIndex(of: "--legacy-detect"),
+   CommandLine.arguments.indices.contains(detectIndex + 1) {
+    let url = URL(fileURLWithPath: CommandLine.arguments[detectIndex + 1])
+    let result = LegacyFrameDetector.insetAdaptiveResult(
+        LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: url)
+    )
+    print("count=\(result.crops.count)")
+    for (index, crop) in result.crops.enumerated() {
+        let rect = crop.rect.normalized
+        print(String(format: "%d x=%.6f y=%.6f w=%.6f h=%.6f", index + 1, rect.minX, rect.minY, rect.width, rect.height))
+    }
+    exit(EXIT_SUCCESS)
 }
 
 LegacyLaunchLog.write("process started")

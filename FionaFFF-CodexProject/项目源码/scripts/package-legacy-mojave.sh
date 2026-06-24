@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DISPLAY_NAME="FionaFFF"
 EXECUTABLE_NAME="fiona-spotter-tool"
-APP_VERSION="0.35.2"
-APP_BUILD="68"
-RELEASE_BASE_NAME="$APP_DISPLAY_NAME-Mojave-Intel-$APP_VERSION-$APP_BUILD"
+APP_VERSION="0.37.0"
+APP_BUILD="91"
+APP_DISPLAY_NAME="FionaFFF Test Mojave $APP_VERSION-$APP_BUILD"
+APP_BUNDLE_ID="local.fiona.fff.test.mojave.v${APP_VERSION//./}.b$APP_BUILD"
+RELEASE_BASE_NAME="FionaFFF-Test-Mojave-Intel-$APP_VERSION-$APP_BUILD"
 RELEASE_NAME="$RELEASE_BASE_NAME"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$DIST_DIR/$RELEASE_NAME"
@@ -61,7 +62,9 @@ swiftc \
 cat > "$EXECUTABLE" <<'SCRIPT'
 #!/bin/bash
 
-LOG="$HOME/Desktop/fionafff-mojave-launcher.log"
+LOG_DIR="$HOME/Library/Logs/FionaFFF"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp"
+LOG="$LOG_DIR/fionafff-mojave-launcher.log"
 APP_MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_CONTENTS_DIR="$(cd "$APP_MACOS_DIR/.." && pwd)"
 REAL_EXECUTABLE="$APP_MACOS_DIR/fiona-spotter-tool-bin"
@@ -79,23 +82,29 @@ fi
   echo "Frameworks:"
   ls -la "$APP_CONTENTS_DIR/Frameworks" 2>&1 || true
   echo "Running app binary..."
-} >> "$LOG" 2>&1
+} >> "$LOG" 2>&1 || true
 
-exec "$REAL_EXECUTABLE" >> "$LOG" 2>&1
+exec "$REAL_EXECUTABLE" >> "$LOG" 2>&1 || exec "$REAL_EXECUTABLE"
 SCRIPT
 
 chmod +x "$EXECUTABLE"
 
 cp "Sources/ImgSlicer/Resources/AppIconSource.png" "$RESOURCES/AppIconSource.png"
-if ! swift scripts/generate-icon.swift "$RESOURCES/AppIcon.icns" "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png"; then
-  FALLBACK_ICON="$ROOT_DIR/Sources/ImgSlicer/Resources/AppIcon.icns"
-  if [ -f "$FALLBACK_ICON" ]; then
-    cp "$FALLBACK_ICON" "$RESOURCES/AppIcon.icns"
-  else
-    echo "无法生成 AppIcon.icns，且没有找到可复用的旧图标。" >&2
-    exit 1
-  fi
-fi
+ICONSET="$RESOURCES/AppIcon.iconset"
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+sips -z 16 16     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_16x16.png" >/dev/null
+sips -z 32 32     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+sips -z 32 32     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_32x32.png" >/dev/null
+sips -z 64 64     "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+sips -z 128 128   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_128x128.png" >/dev/null
+sips -z 256 256   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+sips -z 256 256   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_256x256.png" >/dev/null
+sips -z 512 512   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+sips -z 512 512   "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_512x512.png" >/dev/null
+sips -z 1024 1024 "$ROOT_DIR/Sources/ImgSlicer/Resources/AppIconSource.png" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+iconutil -c icns "$ICONSET" -o "$RESOURCES/AppIcon.icns"
+rm -rf "$ICONSET"
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -105,19 +114,19 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>
   <string>fiona-spotter-tool</string>
   <key>CFBundleIdentifier</key>
-  <string>local.fiona.fff</string>
+  <string>__APP_BUNDLE_ID__</string>
   <key>CFBundleName</key>
-  <string>FionaFFF</string>
+  <string>__APP_DISPLAY_NAME__</string>
   <key>CFBundleDisplayName</key>
-  <string>FionaFFF</string>
+  <string>__APP_DISPLAY_NAME__</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.35.2-legacy-68</string>
+  <string>__APP_VERSION__</string>
   <key>CFBundleVersion</key>
-  <string>68</string>
+  <string>__APP_BUILD__</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.14</string>
   <key>NSHighResolutionCapable</key>
@@ -126,11 +135,18 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+sed -i '' \
+  -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" \
+  -e "s/__APP_BUNDLE_ID__/$APP_BUNDLE_ID/g" \
+  -e "s/__APP_VERSION__/$APP_VERSION/g" \
+  -e "s/__APP_BUILD__/$APP_BUILD/g" \
+  "$CONTENTS/Info.plist"
+
 install_name_tool -delete_rpath "@executable_path/../Frameworks" "$REAL_EXECUTABLE" 2>/dev/null || true
 install_name_tool -add_rpath /usr/lib/swift "$REAL_EXECUTABLE" 2>/dev/null || true
 
 cat > "$README_PATH" <<'TXT'
-FionaFFF Mojave Intel 打开说明
+__APP_DISPLAY_NAME__ Intel 打开说明
 
 这个包用于 macOS 10.14.6 Mojave Intel 电脑。
 
@@ -139,18 +155,20 @@ FionaFFF Mojave Intel 打开说明
 1. 打开 DMG。
 2. 双击“安装.command”。
 3. 如果系统提示不能打开脚本，请右键“安装.command”选择“打开”。
-4. 脚本会复制 FionaFFF.app 到“应用程序”，重新本机签名，并清除 Gatekeeper 隔离标记。
+4. 脚本会复制 __APP_DISPLAY_NAME__.app 到“应用程序”，重新本机签名，并清除 Gatekeeper 隔离标记。
 
 如果双击 app 提示“已损坏”或“无法验证开发者”，通常不是文件损坏，而是未公证测试包被 macOS 加了隔离标记。
 
 手动修复：
 
-   xattr -dr com.apple.quarantine "/Applications/FionaFFF.app"
-   codesign --force --deep --sign - "/Applications/FionaFFF.app"
+   xattr -dr com.apple.quarantine "/Applications/__APP_DISPLAY_NAME__.app"
+   codesign --force --deep --sign - "/Applications/__APP_DISPLAY_NAME__.app"
 
 说明：
 当前是本地测试包，没有 Apple Developer ID 公证签名。正式分发需要 Apple Developer ID 签名并 notarize。
 TXT
+
+sed -i '' -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" "$README_PATH"
 
 cat > "$CHANGELOG_PATH" <<TXT
 $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
@@ -161,6 +179,16 @@ $APP_DISPLAY_NAME Mojave Intel $APP_VERSION-$APP_BUILD 版本更新说明
 - DMG：$RELEASE_NAME.dmg
 
 本次更新：
+- 底部文件栏取消图片缩略图，只显示系统文件图标、文件名和删除按钮，不再为每个文件解码预览图。
+- 删除非当前文件时不再重新加载当前大图，减少删除和列表刷新的等待；底栏高度同步缩小，扩大中央画布。
+- 左侧任务列表固定按导入顺序从上到下排列。
+- 左侧工具栏按文件操作、自动识别、旋转、缩放、应用与查看工具重新排列，移除当前图片下拉菜单，任务列表使用剩余纵向空间。
+- 右侧第一排只保留新增和删除当前选框，第二排统一微调；算法候选改为直接可点击列表，显示算法名称、识别张数和可信度。
+- 键盘方向键绑定为移动当前图片全部红框，支持按住连续微调。
+- FFF/3F 解析默认关闭，需要时可在右侧手动开启。
+- 重做左侧任务区：取消任务下拉菜单，改为按文件夹名称显示的竖向任务列表；每个任务可直接选择、单独终止或删除。
+- 左侧工具重新分区为任务列表、文件操作、当前图片与画面工具，减少按钮混杂并扩大任务列表可视面积。
+- 优化画布交互性能：拖动画布、拖动红框和滚轮缩放期间统一使用约 1800px 的轻量预览缓存，并将重绘限制在约 60fps，操作结束后恢复高清显示。
 - JPG 导出质量提升至 ImageIO 最高等级 1.0，显著增大文件体积并减少胶片颗粒、天空、树叶和建筑细节的压缩损失；完全无损仍建议使用 TIF 16-bit。
 - 2x6 固定胶片识别后，全部 12 个红框统一沿用第一个手工调整红框的宽高，算法只负责确定各画面中心位置。
 - 改进除尘算法：支持草地等有色背景上的半透明白色小尘点，并通过小面积和纹理保护减少误伤树叶与画面细节。
@@ -211,7 +239,7 @@ cat > "$INSTALLER_PATH" <<'SCRIPT'
 #!/bin/bash
 set -e
 
-APP_NAME="FionaFFF.app"
+APP_NAME="__APP_DISPLAY_NAME__.app"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_APP="$SOURCE_DIR/$APP_NAME"
 TARGET_APP="/Applications/$APP_NAME"
@@ -222,7 +250,39 @@ if [ ! -d "$SOURCE_APP" ]; then
   exit 1
 fi
 
-echo "正在安装 FionaFFF 到 /Applications..."
+echo "正在安装 __APP_DISPLAY_NAME__ 到 /Applications..."
+echo "正在关闭可能仍在运行的旧版 FionaFFF..."
+killall "fiona-spotter-tool-bin" 2>/dev/null || true
+killall "fiona-spotter-tool" 2>/dev/null || true
+sleep 1
+
+for OLD_APP in \
+  "/Applications/FionaFFF Test Mojave 0.35.2.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.3-74.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.4-75.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.5-76.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.6-77.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.7-78.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.8-79.app" \
+  "/Applications/FionaFFF Test Mojave 0.35.9-80.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.0-81.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.1-82.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.2-83.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.3-84.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.4-85.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.5-86.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.6-87.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.7-88.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.8-89.app" \
+  "/Applications/FionaFFF Test Mojave 0.36.9-90.app"; do
+  if [ -e "$OLD_APP" ] && [ "$OLD_APP" != "$TARGET_APP" ]; then
+    echo "正在移除旧测试版：$OLD_APP"
+    if ! rm -rf "$OLD_APP" 2>/dev/null; then
+      sudo rm -rf "$OLD_APP"
+    fi
+  fi
+done
+
 if [ -e "$TARGET_APP" ]; then
   echo "正在删除旧版本..."
   if ! rm -rf "$TARGET_APP" 2>/dev/null; then
@@ -245,7 +305,7 @@ xattr -cr "$TARGET_APP" 2>/dev/null || true
 echo "正在进行本机 ad-hoc 签名..."
 codesign --force --deep --sign - "$TARGET_APP"
 
-echo "正在启动 FionaFFF..."
+echo "正在启动 __APP_DISPLAY_NAME__..."
 open "$TARGET_APP"
 
 echo ""
@@ -253,13 +313,15 @@ echo "安装完成。"
 read -n 1 -s -r -p "按任意键关闭窗口..."
 SCRIPT
 
+sed -i '' -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" "$INSTALLER_PATH"
+
 chmod +x "$INSTALLER_PATH"
 
 cat > "$DIAGNOSTIC_PATH" <<'SCRIPT'
 #!/bin/bash
 set -e
 
-APP_NAME="FionaFFF.app"
+APP_NAME="__APP_DISPLAY_NAME__.app"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_APP="$SOURCE_DIR/$APP_NAME"
 TARGET_APP="/Applications/$APP_NAME"
@@ -295,14 +357,16 @@ echo "启动器日志在桌面：fionafff-mojave-launcher.log"
 read -n 1 -s -r -p "按任意键关闭窗口..."
 SCRIPT
 
+sed -i '' -e "s/__APP_DISPLAY_NAME__/$APP_DISPLAY_NAME/g" "$DIAGNOSTIC_PATH"
+
 chmod +x "$DIAGNOSTIC_PATH"
 
-codesign --force --deep --sign - "$APP_DIR"
 xattr -cr "$APP_DIR"
+codesign --force --deep --sign - "$APP_DIR"
 hdiutil create -volname "$RELEASE_NAME" -srcfolder "$RELEASE_DIR" -ov -format UDZO "$DMG_PATH"
 
 SMB_COPY_DIR="/Volumes/照片临时/fionafff客户端"
-if [ -d "$(dirname "$SMB_COPY_DIR")" ]; then
+if [ "${COPY_TO_SMB:-0}" = "1" ] && [ -d "$(dirname "$SMB_COPY_DIR")" ]; then
   mkdir -p "$SMB_COPY_DIR" 2>/dev/null || true
   if [ -d "$SMB_COPY_DIR" ] && cp -f "$DMG_PATH" "$SMB_COPY_DIR/"; then
     echo "已复制 DMG 到 SMB：$SMB_COPY_DIR/$(basename "$DMG_PATH")"
@@ -310,7 +374,7 @@ if [ -d "$(dirname "$SMB_COPY_DIR")" ]; then
     echo "未能复制 DMG 到 SMB：$SMB_COPY_DIR"
   fi
 else
-  echo "SMB 共享未挂载，跳过复制：$SMB_COPY_DIR"
+  echo "未启用 SMB 复制，跳过：$SMB_COPY_DIR"
 fi
 
 echo "$APP_DIR"
