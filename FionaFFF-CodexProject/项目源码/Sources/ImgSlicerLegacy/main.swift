@@ -351,12 +351,17 @@ final class LegacyWindowController: NSViewController {
     private let dustStrengthLabel = NSTextField(labelWithString: "强度 35")
     private let filmstripScroll = NSScrollView()
     private let filmstripStack = NSStackView()
+    private let previewCache = NSCache<NSString, NSImage>()
+    private let previewQueue = DispatchQueue(label: "fiona.spotter.legacy.preview", qos: .userInitiated)
     private var tasks: [LegacyTask] = []
     private var selectedTaskIndex = 0
     private var selectedPhotoIndex = 0
     private var selectedTaskIndexes: Set<Int> = []
     private var lastTaskSelectionIndex: Int?
     private var filmstripPhotoRefs: [(taskIndex: Int, photoIndex: Int)] = []
+    private var previewLoadGeneration = 0
+    private var pendingFilmstripRefresh: DispatchWorkItem?
+    private var fileTypeIconCache: [String: NSImage] = [:]
     private var exportDirectory: URL?
     private var templateRect: CGRect?
     private var templateImageAspect: Double?
@@ -390,6 +395,7 @@ final class LegacyWindowController: NSViewController {
 
     override func loadView() {
         LegacyLaunchLog.write("loadView")
+        previewCache.countLimit = 8
         let rootView = LegacyDropRootView(frame: NSRect(x: 0, y: 0, width: 1280, height: 760))
         rootView.onFileDropped = { [weak self] urls in
             self?.importItems(urls)
@@ -420,7 +426,7 @@ final class LegacyWindowController: NSViewController {
         dustStrengthSlider.action = #selector(dustStrengthChanged)
         photoPopup.target = self
         photoPopup.action = #selector(photoSelectionChanged)
-        detectionModePopup.addItems(withTitles: ["固定第一手动框大小", "自动适应画面边界"])
+        detectionModePopup.addItems(withTitles: ["135画幅", "120画幅"])
         detectionModePopup.selectItem(at: DetectionSizingMode.fixedFirstManual.rawValue)
         detectionModePopup.target = self
         detectionModePopup.action = #selector(detectionModeChanged)
@@ -1454,6 +1460,8 @@ final class LegacyWindowController: NSViewController {
     }
 
     private func loadSelectedPhoto() {
+        previewLoadGeneration += 1
+        let generation = previewLoadGeneration
         guard let task = selectedTask, task.photos.indices.contains(selectedPhotoIndex) else {
             canvas.setImage(NSImage(size: NSSize(width: 1, height: 1)), crops: [], rotationDegrees: 0, inverted: false)
             fileNameLabel.stringValue = "未导入文件"
@@ -1462,17 +1470,6 @@ final class LegacyWindowController: NSViewController {
             return
         }
         let photo = task.photos[selectedPhotoIndex]
-        guard let image = LegacyImageIO.thumbnail(url: photo.url, maxPixelSize: 6200) else {
-            statusLabel.stringValue = "无法打开图片。"
-            return
-        }
-        canvas.setImage(
-            image,
-            crops: photo.crops,
-            rotationDegrees: photo.previewRotationDegrees,
-            inverted: photo.isInverted,
-            adjustments: photo.adjustments
-        )
         fileNameLabel.stringValue = "\(task.name)：\(selectedPhotoIndex + 1) / \(task.photos.count)  \(photo.name)"
         outputLabel.stringValue = effectiveSelectedTaskIndexes().count > 1
             ? "输出：分别输出到各任务原文件夹"
@@ -1481,6 +1478,46 @@ final class LegacyWindowController: NSViewController {
         rebuildAlgorithmPopup(for: photo)
         updateFilmstripSelection()
         refreshSummary()
+
+        let url = photo.url.standardizedFileURL
+        let cacheKey = url.path as NSString
+        if let cached = previewCache.object(forKey: cacheKey) {
+            canvas.setImage(
+                cached,
+                crops: photo.crops,
+                rotationDegrees: photo.previewRotationDegrees,
+                inverted: photo.isInverted,
+                adjustments: photo.adjustments
+            )
+            return
+        }
+
+        canvas.setImage(NSImage(size: NSSize(width: 1, height: 1)), crops: [], rotationDegrees: 0, inverted: false)
+        statusLabel.stringValue = "正在后台加载预览：\(photo.name)"
+        previewQueue.async { [weak self] in
+            guard let self else { return }
+            var isCurrentRequest = false
+            DispatchQueue.main.sync {
+                isCurrentRequest = generation == self.previewLoadGeneration
+            }
+            guard isCurrentRequest,
+                  let image = LegacyImageIO.thumbnail(url: url, maxPixelSize: 4200) else { return }
+            self.previewCache.setObject(image, forKey: cacheKey)
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      generation == self.previewLoadGeneration,
+                      self.selectedPhoto?.url.standardizedFileURL == url,
+                      let current = self.selectedPhoto else { return }
+                self.canvas.setImage(
+                    image,
+                    crops: current.crops,
+                    rotationDegrees: current.previewRotationDegrees,
+                    inverted: current.isInverted,
+                    adjustments: current.adjustments
+                )
+                self.statusLabel.stringValue = "预览已加载：\(current.name)"
+            }
+        }
     }
 
     private func photoKey(_ url: URL) -> String {
@@ -1543,9 +1580,11 @@ final class LegacyWindowController: NSViewController {
                 statusLabel.stringValue = "请先手动调整第一个红框，作为固定识别尺寸。"
                 return
             }
-            crops = Self.templateSizedCrops(from: candidate.rects, template: template)
+            crops = LegacyFrameDetector.isStandardTwoBySixFile(photo.url, detectedRects: candidate.rects)
+                ? Self.templateSizedCrops(from: candidate.rects, template: template)
+                : LegacyFrameDetector.insetAdaptiveRects(candidate.rects).map { LegacyCrop(rect: $0) }
         case .adaptiveBoundary:
-            crops = candidate.rects.sortedForReadingOrder().map { LegacyCrop(rect: $0.normalized) }
+            crops = LegacyFrameDetector.insetAdaptiveRects(candidate.rects).map { LegacyCrop(rect: $0) }
         }
         guard !crops.isEmpty else { return }
         tasks[selectedTaskIndex].photos[selectedPhotoIndex].crops = crops
@@ -1554,7 +1593,8 @@ final class LegacyWindowController: NSViewController {
         canvas.needsDisplay = true
         templateRect = crops.sortedForReadingOrder().first?.rect
         detectionReportLabel.stringValue = LegacyDetectionResult(crops: crops, candidates: candidates).reportText
-        let modeText = detectionSizingMode == .fixedFirstManual ? "已固定为第一手动框大小。" : "每个红框使用自动识别边界。"
+        let usesFixedSize = detectionSizingMode == .fixedFirstManual && LegacyFrameDetector.isStandardTwoBySixFile(photo.url, detectedRects: candidate.rects)
+        let modeText = usesFixedSize ? "135画幅已固定为第一手动框大小。" : "120画幅使用自动识别边界。"
         statusLabel.stringValue = "已应用算法结果：\(candidate.title) · \(crops.count) 张 · 可信度 \(Int(candidate.score * 100))%。\(modeText)"
         rebuildAlgorithmPopup(for: tasks[selectedTaskIndex].photos[selectedPhotoIndex])
         refreshSummary()
@@ -1563,8 +1603,8 @@ final class LegacyWindowController: NSViewController {
     @objc private func detectionModeChanged() {
         detectionSizingMode = DetectionSizingMode(rawValue: detectionModePopup.indexOfSelectedItem) ?? .fixedFirstManual
         statusLabel.stringValue = detectionSizingMode == .fixedFirstManual
-            ? "识别模式：以第一个手动调整红框为固定大小。"
-            : "识别模式：每个画面自动适应边界。"
+            ? "识别模式：135画幅使用第一手动框，非 135 文件自动识别真实边界。"
+            : "识别模式：120画幅自动适应画面边界。"
     }
 
     private static func currentFixedTemplate(from crops: [LegacyCrop], fallback: CGRect?) -> CGRect? {
@@ -1733,6 +1773,27 @@ final class LegacyWindowController: NSViewController {
         refreshThemeText(in: taskListStack)
     }
 
+    private func updateTaskListSelectionAppearance() {
+        for (index, view) in taskListStack.arrangedSubviews.enumerated() {
+            guard tasks.indices.contains(index), let row = view as? LegacyTaskRowView else { continue }
+            row.isSelected = selectedTaskIndexes.contains(index) || index == selectedTaskIndex
+            for subview in row.subviews {
+                guard let checkbox = subview as? NSButton,
+                      checkbox.identifier == NSUserInterfaceItemIdentifier("taskSelectionCheckbox") else { continue }
+                checkbox.state = selectedTaskIndexes.contains(index) ? .on : .off
+            }
+        }
+    }
+
+    private func scheduleFilmstripRefresh() {
+        pendingFilmstripRefresh?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.rebuildFilmstrip()
+        }
+        pendingFilmstripRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+    }
+
     private func updateTaskCountLabel(in root: NSView) {
         for subview in root.subviews {
             if let field = subview as? NSTextField,
@@ -1768,7 +1829,7 @@ final class LegacyWindowController: NSViewController {
                 let filmstripIndex = filmstripPhotoRefs.count
                 filmstripPhotoRefs.append((taskIndex: taskIndex, photoIndex: photoIndex))
                 let imageView = NSImageView()
-                imageView.image = NSWorkspace.shared.icon(forFile: photo.url.path)
+                imageView.image = cachedFileTypeIcon(for: photo.url)
                 imageView.imageScaling = .scaleProportionallyDown
                 imageView.imageAlignment = .alignCenter
                 imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -1827,6 +1888,14 @@ final class LegacyWindowController: NSViewController {
         updateFilmstripSelection()
     }
 
+    private func cachedFileTypeIcon(for url: URL) -> NSImage {
+        let key = url.pathExtension.lowercased()
+        if let cached = fileTypeIconCache[key] { return cached }
+        let icon = NSWorkspace.shared.icon(forFileType: key.isEmpty ? "public.data" : key)
+        fileTypeIconCache[key] = icon
+        return icon
+    }
+
     private func updateFilmstripSelection() {
         for (filmstripIndex, view) in filmstripStack.arrangedSubviews.enumerated() {
             let isCurrent = filmstripPhotoRefs.indices.contains(filmstripIndex)
@@ -1856,6 +1925,8 @@ final class LegacyWindowController: NSViewController {
     @objc private func taskListSelectionChanged(_ sender: NSButton) {
         let index = sender.tag
         guard tasks.indices.contains(index) else { return }
+        let previousSelection = selectedTaskIndexes
+        let previousActiveIndex = selectedTaskIndex
         let modifiers = NSApp.currentEvent?.modifierFlags ?? []
         let isCheckbox = sender.identifier == NSUserInterfaceItemIdentifier("taskSelectionCheckbox")
 
@@ -1881,10 +1952,25 @@ final class LegacyWindowController: NSViewController {
         let activeIndex = selectedTaskIndexes.contains(index)
             ? index
             : (selectedTaskIndexes.sorted().first ?? index)
-        selectTask(at: activeIndex, preserveTaskSelection: true)
+        if activeIndex != previousActiveIndex {
+            selectTask(
+                at: activeIndex,
+                preserveTaskSelection: true,
+                refreshFilmstrip: previousSelection != selectedTaskIndexes
+            )
+        } else {
+            updateTaskListSelectionAppearance()
+            if previousSelection != selectedTaskIndexes {
+                scheduleFilmstripRefresh()
+            }
+            outputLabel.stringValue = effectiveSelectedTaskIndexes().count > 1
+                ? "输出：分别输出到各任务原文件夹"
+                : "输出：\(exportDirectory?.path ?? tasks[activeIndex].rootURL.path)"
+            refreshSummary()
+        }
     }
 
-    private func selectTask(at index: Int, preserveTaskSelection: Bool = false) {
+    private func selectTask(at index: Int, preserveTaskSelection: Bool = false, refreshFilmstrip: Bool = true) {
         guard tasks.indices.contains(index) else { return }
         saveCurrentCrops()
         selectedTaskIndex = index
@@ -1893,9 +1979,13 @@ final class LegacyWindowController: NSViewController {
             selectedTaskIndexes = [index]
             lastTaskSelectionIndex = index
         }
-        rebuildTaskList()
+        updateTaskListSelectionAppearance()
         rebuildPhotoPopup()
-        rebuildFilmstrip()
+        if refreshFilmstrip {
+            scheduleFilmstripRefresh()
+        } else {
+            updateFilmstripSelection()
+        }
         loadSelectedPhoto()
     }
 
@@ -1936,7 +2026,7 @@ final class LegacyWindowController: NSViewController {
         let ref = filmstripPhotoRefs[sender.tag]
         selectedTaskIndex = ref.taskIndex
         selectedPhotoIndex = ref.photoIndex
-        rebuildTaskList()
+        updateTaskListSelectionAppearance()
         rebuildPhotoPopup()
         loadSelectedPhoto()
     }
@@ -2215,15 +2305,31 @@ final class LegacyWindowController: NSViewController {
             let results = snapshots.map { taskIndex, photos in
                 let detections = photos.map { photo -> LegacyDetectionResult in
                     if mode == .fixedFirstManual, let template {
-                        let result = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
-                        if result.crops.isEmpty {
-                            return LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: result.candidates)
+                        if LegacyFrameDetector.hasStandardTwoBySixResolution(photo.url) {
+                            let standard = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
+                            let detectedRects = standard.candidates.first?.rects ?? standard.crops.map(\.rect)
+                            let fixed = Self.templateSizedCrops(from: detectedRects, template: template)
+                            return LegacyDetectionResult(
+                                crops: fixed.isEmpty ? LegacyFrameDetector.tiledCrops(template: template) : fixed,
+                                candidates: standard.candidates
+                            )
                         }
-                        let candidate = result.candidates.first
-                        let fixed = Self.templateSizedCrops(from: candidate?.rects ?? result.crops.map(\.rect), template: template)
-                        return LegacyDetectionResult(crops: fixed, candidates: result.candidates)
+                        let automatic = LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                        if !automatic.crops.isEmpty {
+                            guard LegacyFrameDetector.isStandardTwoBySixLayout(automatic.crops.map(\.rect)) else {
+                                return LegacyFrameDetector.insetAdaptiveResult(automatic)
+                            }
+                            let fixed = Self.templateSizedCrops(from: automatic.crops.map(\.rect), template: template)
+                            return LegacyDetectionResult(crops: fixed, candidates: automatic.candidates)
+                        }
+                        let fallback = LegacyFrameDetector.detectBestTemplateCropsWithReport(url: photo.url, template: template)
+                        return fallback.crops.isEmpty
+                            ? LegacyDetectionResult(crops: LegacyFrameDetector.tiledCrops(template: template), candidates: fallback.candidates)
+                            : fallback
                     }
-                    return LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                    return LegacyFrameDetector.insetAdaptiveResult(
+                        LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: photo.url)
+                    )
                 }
                 return (taskIndex, photos, detections)
             }
@@ -2242,7 +2348,7 @@ final class LegacyWindowController: NSViewController {
                    selectedResult.2.indices.contains(selectedPhoto) {
                     self.detectionReportLabel.stringValue = selectedResult.2[selectedPhoto].reportText
                 }
-                self.statusLabel.stringValue = "已识别 \(taskIndexes.count) 个任务、\(photoCount) 张图片，共 \(cropCount) 个红框。"
+                self.statusLabel.stringValue = "已识别 \(taskIndexes.count) 个任务、\(photoCount) 张图片，共 \(cropCount) 个红框；非 135 文件已自动使用真实边界。"
                 self.refreshSummary()
             }
         }
@@ -3458,6 +3564,17 @@ enum LegacyToneMapper {
 }
 
 enum LegacyImageIO {
+    static func pixelSize(url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(
+            url as CFURL,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ),
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+        let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { return nil }
+        return CGSize(width: width.doubleValue, height: height.doubleValue)
+    }
+
     static func thumbnail(url: URL, maxPixelSize: Int) -> NSImage? {
         if let decoder = FFFParsingRuntime.decoder(for: url),
            let cgImage = decoder.makePreviewCGImage(maxPixelSize: maxPixelSize) {
@@ -3495,6 +3612,100 @@ enum LegacyImageIO {
 }
 
 enum LegacyFrameDetector {
+    static func insetAdaptiveRects(_ rects: [CGRect], fraction: CGFloat = 0.018) -> [CGRect] {
+        let effectiveFraction = isFourFrame120HorizontalLayout(rects) ? CGFloat(0.006) : fraction
+        return rects
+            .map { rect -> CGRect in
+                let normalized = rect.normalized
+                let insetX = max(0.0006, normalized.width * effectiveFraction)
+                let insetY = max(0.0006, normalized.height * effectiveFraction)
+                guard normalized.width > insetX * 2.5, normalized.height > insetY * 2.5 else { return normalized }
+                return normalized.insetBy(dx: insetX, dy: insetY).normalized
+            }
+            .sortedForReadingOrder()
+    }
+
+    private static func isFourFrame120HorizontalLayout(_ rects: [CGRect]) -> Bool {
+        guard rects.count == 4 else { return false }
+        let normalized = rects.map { $0.normalized }.sorted { $0.midX < $1.midX }
+        let medianWidth = median(normalized.map { Double($0.width) })
+        let medianHeight = median(normalized.map { Double($0.height) })
+        guard medianWidth >= 0.15,
+              medianWidth <= 0.28,
+              medianHeight >= 0.72,
+              medianHeight <= 0.94 else { return false }
+        let midYSpread = normalized.map(\.midY).max()! - normalized.map(\.midY).min()!
+        guard midYSpread <= 0.035 else { return false }
+        return normalized.allSatisfy { rect in
+            Double(rect.width) >= medianWidth * 0.78 &&
+                Double(rect.width) <= medianWidth * 1.22 &&
+                Double(rect.height) >= medianHeight * 0.96 &&
+                Double(rect.height) <= medianHeight * 1.04
+        }
+    }
+
+    static func insetAdaptiveResult(_ result: LegacyDetectionResult) -> LegacyDetectionResult {
+        let candidates = result.candidates.map { candidate in
+            LegacyDetectionCandidate(
+                title: candidate.title,
+                detail: candidate.detail + " · 边界内收",
+                rects: insetAdaptiveRects(candidate.rects),
+                score: candidate.score
+            )
+        }
+        return LegacyDetectionResult(
+            crops: insetAdaptiveRects(result.crops.map(\.rect)).map { LegacyCrop(rect: $0) },
+            candidates: candidates
+        )
+    }
+
+    static func hasStandardTwoBySixResolution(_ url: URL) -> Bool {
+        guard let size = LegacyImageIO.pixelSize(url: url) else { return false }
+        let references = [
+            CGSize(width: 14_715, height: 3_996),
+            CGSize(width: 22_077, height: 5_995)
+        ]
+        return references.contains { reference in
+            abs(size.width - reference.width) / reference.width <= 0.08 &&
+                abs(size.height - reference.height) / reference.height <= 0.08
+        }
+    }
+
+    static func isStandardTwoBySixFile(_ url: URL, detectedRects: [CGRect]) -> Bool {
+        hasStandardTwoBySixResolution(url) || isStandardTwoBySixLayout(detectedRects)
+    }
+
+    static func isStandardTwoBySixLayout(_ rects: [CGRect]) -> Bool {
+        guard rects.count == 12 else { return false }
+        let normalized = rects.map { $0.normalized }.sorted { $0.midY < $1.midY }
+        let firstRow = Array(normalized.prefix(6)).sorted { $0.midX < $1.midX }
+        let secondRow = Array(normalized.suffix(6)).sorted { $0.midX < $1.midX }
+        let medianWidth = median(normalized.map { Double($0.width) })
+        let medianHeight = median(normalized.map { Double($0.height) })
+        guard medianWidth > 0.02, medianHeight > 0.02 else { return false }
+
+        func rowIsRegular(_ row: [CGRect]) -> Bool {
+            let centerY = row.reduce(CGFloat(0)) { $0 + $1.midY } / CGFloat(row.count)
+            guard row.allSatisfy({ abs($0.midY - centerY) <= CGFloat(medianHeight * 0.42) }) else { return false }
+            guard row.allSatisfy({
+                let widthRatio = Double($0.width) / medianWidth
+                let heightRatio = Double($0.height) / medianHeight
+                return widthRatio >= 0.62 && widthRatio <= 1.55 && heightRatio >= 0.68 && heightRatio <= 1.45
+            }) else { return false }
+            return zip(row, row.dropFirst()).allSatisfy { left, right in
+                right.midX > left.midX && right.minX >= left.minX + left.width * 0.45
+            }
+        }
+
+        guard rowIsRegular(firstRow), rowIsRegular(secondRow) else { return false }
+        let firstCenterY = firstRow.reduce(CGFloat(0)) { $0 + $1.midY } / 6
+        let secondCenterY = secondRow.reduce(CGFloat(0)) { $0 + $1.midY } / 6
+        guard secondCenterY - firstCenterY >= CGFloat(medianHeight * 0.58) else { return false }
+        return zip(firstRow, secondRow).allSatisfy { upper, lower in
+            abs(upper.midX - lower.midX) <= CGFloat(medianWidth * 0.70)
+        }
+    }
+
     static func anchorAlignedCrops(url: URL, sourceCrops: [LegacyCrop], anchor: CGRect) -> [LegacyCrop] {
         guard !sourceCrops.isEmpty else { return [] }
         let detected = detectBestTemplateCrops(url: url, template: anchor)
@@ -3523,6 +3734,7 @@ enum LegacyFrameDetector {
 
     private static func detectBestCropsWithReport(url: URL, template: CGRect?) -> LegacyDetectionResult {
         var candidates: [LegacyDetectionCandidate] = []
+        var deferredSingleCandidate: LegacyDetectionCandidate?
         let analysis = LegacyImageIO.grayThumbnail(url: url, maxPixelSize: 4096)
         if let gray = analysis {
             let luminances = gray.bytes.map { Double($0) / 255.0 }
@@ -3531,16 +3743,11 @@ enum LegacyFrameDetector {
                 width: gray.width,
                 height: gray.height
             ) {
-                let displayRect = rasterRectToDisplayRect(singleRect)
-                let candidate = LegacyDetectionCandidate(
+                deferredSingleCandidate = LegacyDetectionCandidate(
                     title: "单张完整片框",
                     detail: "单幅扫描，按底片外边界识别一个画面",
-                    rects: [displayRect],
-                    score: min(1, scoreCandidate([singleRect], expectedCount: 1) + 0.70)
-                )
-                return LegacyDetectionResult(
-                    crops: [LegacyCrop(rect: displayRect)],
-                    candidates: [candidate]
+                    rects: [singleRect],
+                    score: min(1, scoreCandidate([singleRect], expectedCount: 1) + 0.25)
                 )
             }
             let strictRects = detectTwoRowSixFrameRects(luminances: luminances, width: gray.width, height: gray.height)
@@ -3558,7 +3765,7 @@ enum LegacyFrameDetector {
         let negativeRects = detectNegativeFilmRects(url: url)
         if !negativeRects.isEmpty {
             let isCompleteTwoBySix = negativeRects.count == 12 && hasCompleteTwoRowSixCoverage(negativeRects)
-            let partialStripBonus = negativeRects.count >= 3 && negativeRects.count < 12 ? 0.34 : 0
+            let partialStripBonus = negativeRects.count >= 2 && negativeRects.count < 12 ? 0.34 : 0
             candidates.append(LegacyDetectionCandidate(
                 title: isCompleteTwoBySix ? "浅色/黑色片距" : "按实际张数识别",
                 detail: isCompleteTwoBySix ? "完整 2×6 负片胶片片距检测" : "不补齐空位，按实际可见画面检测",
@@ -3568,6 +3775,9 @@ enum LegacyFrameDetector {
                     expectedCount: isCompleteTwoBySix ? 12 : nil
                 ) + partialStripBonus
             ))
+        }
+        if negativeRects.count < 2, let deferredSingleCandidate {
+            candidates.append(deferredSingleCandidate)
         }
         if let template {
             let templateCrops = detectTemplatePositionCrops(url: url, template: template)
@@ -3744,6 +3954,16 @@ enum LegacyFrameDetector {
         guard filmWidth >= Int(Double(width) * 0.55),
               filmWidth <= Int(Double(width) * 0.98) else { return [] }
 
+        if let recovered = recoverThreeFrame120VerticalStrip(
+            luminances: luminances,
+            width: width,
+            height: height,
+            xStart: xStart,
+            xEnd: xEnd
+        ) {
+            return recovered
+        }
+
         var rowBody = [Double](repeating: 0, count: height)
         var rowBlack = [Double](repeating: 0, count: height)
         for y in 0..<height {
@@ -3812,6 +4032,157 @@ enum LegacyFrameDetector {
                 height: height
             )
         }
+    }
+
+    private static func recoverThreeFrame120VerticalStrip(
+        luminances: [Double],
+        width: Int,
+        height: Int,
+        xStart: Int,
+        xEnd: Int
+    ) -> [CGRect]? {
+        let filmWidth = max(1, xEnd - xStart)
+        let stripAspect = Double(height) / Double(width)
+        guard stripAspect >= 2.45, stripAspect <= 3.65 else { return nil }
+
+        var rowBlack = [Double](repeating: 0, count: height)
+        var rowUltraBlack = [Double](repeating: 0, count: height)
+        var rowNonWhite = [Double](repeating: 0, count: height)
+        for y in 0..<height {
+            var black = 0
+            var ultraBlack = 0
+            var nonWhite = 0
+            for x in xStart..<xEnd {
+                let value = luminances[y * width + x]
+                if value <= 0.10 { black += 1 }
+                if value <= 0.005 { ultraBlack += 1 }
+                if value < 0.985 { nonWhite += 1 }
+            }
+            rowBlack[y] = Double(black) / Double(filmWidth)
+            rowUltraBlack[y] = Double(ultraBlack) / Double(filmWidth)
+            rowNonWhite[y] = Double(nonWhite) / Double(filmWidth)
+        }
+
+        let activeRows = movingAverage(rowNonWhite, window: max(3, height / 650))
+            .enumerated()
+            .compactMap { index, value in value >= 0.18 ? index : nil }
+        guard let filmTop = activeRows.first,
+              let filmBottomValue = activeRows.last,
+              filmBottomValue > filmTop else { return nil }
+        let filmBottom = min(height, filmBottomValue + 1)
+
+        let smoothedBlack = movingAverage(rowBlack, window: max(3, height / 700))
+        let smoothedUltraBlack = movingAverage(rowUltraBlack, window: max(3, height / 700))
+        let ultraGaps = mergeCloseSegments(
+            thresholdSegments(
+                values: smoothedUltraBlack,
+                threshold: 0.55,
+                minimumSize: max(3, height / 760),
+                lessThan: false
+            ),
+            maxGap: max(2, height / 900)
+        ).filter { gap in
+            gap.end > filmTop && gap.start < filmBottom
+                && gap.size <= max(28, filmWidth / 3)
+                && segmentMean(smoothedUltraBlack, gap) >= 0.62
+        }
+        let rawGaps = thresholdSegments(
+            values: smoothedBlack,
+            threshold: 0.58,
+            minimumSize: max(3, height / 760),
+            lessThan: false
+        )
+        let regularGaps = mergeCloseSegments(rawGaps, maxGap: max(2, height / 900))
+            .filter { gap in
+                gap.end > filmTop && gap.start < filmBottom
+                    && gap.size <= max(28, filmWidth / 3)
+                    && segmentMean(smoothedBlack, gap) >= 0.62
+            }
+            .sorted { $0.start < $1.start }
+        let gaps = (ultraGaps.count >= 2 ? ultraGaps : regularGaps)
+            .sorted { $0.start < $1.start }
+        guard gaps.count >= 2 else { return nil }
+
+        let expectedFrameHeight = Double(filmWidth)
+        let minimumFrameHeight = max(40, Int(expectedFrameHeight * 0.62))
+        let maximumFrameHeight = max(minimumFrameHeight + 1, Int(expectedFrameHeight * 1.30))
+
+        var bestRects: [CGRect]?
+        var bestScore = -Double.infinity
+        for firstGapIndex in 0..<(gaps.count - 1) {
+            let firstGap = gaps[firstGapIndex]
+            let secondGap = gaps[firstGapIndex + 1]
+            guard secondGap.start > firstGap.end else { continue }
+
+            let followingGap = gaps.dropFirst(firstGapIndex + 2).first { gap in
+                gap.start - secondGap.end >= minimumFrameHeight
+            }
+            let thirdBottom = followingGap?.start ?? filmBottom
+            let slots = [
+                IntSegment(start: filmTop, end: firstGap.start),
+                IntSegment(start: firstGap.end, end: secondGap.start),
+                IntSegment(start: secondGap.end, end: thirdBottom)
+            ]
+            guard slots.allSatisfy({ $0.size >= minimumFrameHeight && $0.size <= maximumFrameHeight }) else { continue }
+
+            let heights = slots.map { Double($0.size) }
+            let medianHeight = median(heights)
+            guard medianHeight > 0,
+                  heights.allSatisfy({ $0 / medianHeight >= 0.78 && $0 / medianHeight <= 1.22 }) else { continue }
+
+            let gapDarkness = (segmentMean(smoothedBlack, firstGap) + segmentMean(smoothedBlack, secondGap)) / 2
+            let heightScore = 1.0 - min(1.0, abs(medianHeight - expectedFrameHeight) / max(1.0, expectedFrameHeight))
+            let score = heightScore * 0.72 + gapDarkness * 0.28
+            guard score > bestScore else { continue }
+
+            let rects = slots.map { slot -> CGRect in
+                let verticalPadding = max(2, min(slot.size / 140, height / 1200))
+                let top = min(slot.end - 1, slot.start + verticalPadding)
+                let bottom = max(top + 1, slot.end - verticalPadding)
+                return CGRect(
+                    x: Double(xStart) / Double(width),
+                    y: Double(top) / Double(height),
+                    width: Double(filmWidth) / Double(width),
+                    height: Double(bottom - top) / Double(height)
+                ).normalized
+            }
+            let normalized = rects.map { $0.normalized }
+            guard normalized.count == 3,
+                  normalized.allSatisfy({ rect in
+                      let aspect = rect.width / max(rect.height, 0.001)
+                      return rect.width > 0.50 && rect.height > 0.18 && aspect >= 2.45 && aspect <= 3.75
+                  }) else { continue }
+
+            bestScore = score
+            bestRects = normalized.sortedForReadingOrder()
+        }
+
+        if bestRects == nil {
+            let span = filmBottom - filmTop
+            let frameHeight = min(Double(filmWidth) * 1.06, Double(span) / 3.0)
+            guard frameHeight >= Double(filmWidth) * 0.78,
+                  frameHeight <= Double(filmWidth) * 1.16 else { return nil }
+            let extra = max(0, Double(span) - frameHeight * 3.0)
+            let gap = extra / 3.0
+            let regularRects = (0..<3).compactMap { index -> CGRect? in
+                let rawTop = Double(filmTop) + Double(index) * (frameHeight + gap)
+                let rawBottom = rawTop + frameHeight
+                let top = Int(round(rawTop)) + max(2, min(Int(frameHeight) / 160, height / 1400))
+                let bottom = Int(round(rawBottom)) - max(2, min(Int(frameHeight) / 160, height / 1400))
+                guard bottom > top else { return nil }
+                return CGRect(
+                    x: Double(xStart) / Double(width),
+                    y: Double(top) / Double(height),
+                    width: Double(filmWidth) / Double(width),
+                    height: Double(bottom - top) / Double(height)
+                ).normalized
+            }
+            if regularRects.count == 3 {
+                bestRects = regularRects.sortedForReadingOrder()
+            }
+        }
+
+        return bestRects
     }
 
     private static func detectSingleFrameRect(luminances: [Double], width: Int, height: Int) -> CGRect? {
@@ -3935,6 +4306,22 @@ enum LegacyFrameDetector {
     private static func detectHorizontalNegativeFilmRects(luminances: [Double], width: Int, height: Int) -> [CGRect] {
         guard width > height, width > 220, height > 120 else { return [] }
 
+        if let recovered = recoverFourFrame120HorizontalStrip(
+            luminances: luminances,
+            width: width,
+            height: height
+        ) {
+            return recovered
+        }
+
+        if let recovered = recoverTwoFrameHorizontalStrip(
+            luminances: luminances,
+            width: width,
+            height: height
+        ) {
+            return recovered
+        }
+
         var rowActivity = [Double](repeating: 0, count: height)
         for y in 0..<height {
             var body = 0
@@ -3983,6 +4370,179 @@ enum LegacyFrameDetector {
                 && !(rect.width > 0.92 && rect.height > 0.70)
         }
         return keepConsistentNegativeFrames(filtered).sortedForReadingOrder()
+    }
+
+    private static func recoverFourFrame120HorizontalStrip(luminances: [Double], width: Int, height: Int) -> [CGRect]? {
+        let aspect = Double(width) / Double(height)
+        guard aspect >= 2.70, aspect <= 3.45 else { return nil }
+
+        var activeRows: [Int] = []
+        for y in 0..<height {
+            var nonWhite = 0
+            for x in 0..<width where luminances[y * width + x] < 0.985 {
+                nonWhite += 1
+            }
+            if Double(nonWhite) / Double(width) >= 0.10 {
+                activeRows.append(y)
+            }
+        }
+        guard let rawTop = activeRows.first,
+              let rawBottom = activeRows.last,
+              rawBottom - rawTop >= Int(Double(height) * 0.62) else { return nil }
+
+        let yStart = max(0, rawTop)
+        let yEnd = min(height, rawBottom + 1)
+        let filmHeight = max(1, yEnd - yStart)
+        var activeColumns: [Int] = []
+        var darkColumnRatios = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var nonWhite = 0
+            var dark = 0
+            for y in yStart..<yEnd {
+                let value = luminances[y * width + x]
+                if value < 0.985 { nonWhite += 1 }
+                if value <= 0.12 { dark += 1 }
+            }
+            if Double(nonWhite) / Double(filmHeight) >= 0.10 {
+                activeColumns.append(x)
+            }
+            darkColumnRatios[x] = Double(dark) / Double(filmHeight)
+        }
+        guard let filmLeft = activeColumns.first,
+              let filmRightInclusive = activeColumns.last else { return nil }
+        let filmRight = filmRightInclusive + 1
+        let filmWidth = filmRight - filmLeft
+        guard filmWidth >= Int(Double(width) * 0.84) else { return nil }
+
+        let smoothedDark = movingAverage(darkColumnRatios, window: max(3, width / 720))
+        let separators = mergeCloseSegments(
+            thresholdSegments(
+                values: smoothedDark,
+                threshold: 0.54,
+                minimumSize: max(3, width / 1100),
+                lessThan: false
+            ),
+            maxGap: max(2, width / 600)
+        ).filter { segment in
+            let relativeMid = Double(segment.mid - filmLeft) / Double(max(1, filmWidth))
+            return relativeMid > 0.10
+                && relativeMid < 0.90
+                && segment.size <= max(20, width / 10)
+        }
+
+        let expectedStep = Double(filmWidth) / 4.0
+        let matchedSeparators = (1...3).compactMap { boundaryIndex -> IntSegment? in
+            let expected = Double(filmLeft) + Double(boundaryIndex) * expectedStep
+            return separators
+                .filter { separator in
+                    abs(Double(separator.mid) - expected) <= expectedStep * 0.24
+                }
+                .max { segmentMean(smoothedDark, $0) < segmentMean(smoothedDark, $1) }
+        }
+        guard matchedSeparators.count == 3,
+              Set(matchedSeparators.map(\.mid)).count == 3 else { return nil }
+
+        let orderedSeparators = matchedSeparators.sorted { $0.mid < $1.mid }
+        var frames: [CGRect] = []
+        for index in 0..<4 {
+            let left = index == 0 ? filmLeft : orderedSeparators[index - 1].end
+            let right = index == 3 ? filmRight : orderedSeparators[index].start
+            guard right - left >= Int(Double(filmHeight) * 0.46) else { return nil }
+            let refined = refineNegativeFrameRect(
+                xStart: left,
+                xEnd: right,
+                yStart: yStart,
+                yEnd: yEnd,
+                luminances: luminances,
+                width: width,
+                height: height
+            )
+            frames.append(refined)
+        }
+
+        let normalized = frames.map { $0.normalized }
+        let widths = normalized.map { Double($0.width) }
+        let medianWidth = median(widths)
+        guard normalized.count == 4,
+              medianWidth > 0.14,
+              widths.allSatisfy({ $0 > medianWidth * 0.68 && $0 < medianWidth * 1.38 }) else { return nil }
+        return normalized.sortedForReadingOrder()
+    }
+
+    private static func recoverTwoFrameHorizontalStrip(luminances: [Double], width: Int, height: Int) -> [CGRect]? {
+        let aspect = Double(width) / Double(height)
+        guard aspect >= 2.2, aspect <= 3.3 else { return nil }
+
+        var activeRows: [Int] = []
+        for y in 0..<height {
+            var nonWhite = 0
+            for x in 0..<width where luminances[y * width + x] < 0.985 {
+                nonWhite += 1
+            }
+            if Double(nonWhite) / Double(width) >= 0.10 {
+                activeRows.append(y)
+            }
+        }
+        guard let rawTop = activeRows.first,
+              let rawBottom = activeRows.last,
+              rawBottom - rawTop >= Int(Double(height) * 0.58) else { return nil }
+
+        let yStart = max(0, rawTop)
+        let yEnd = min(height, rawBottom + 1)
+        let filmHeight = max(1, yEnd - yStart)
+        var activeColumns: [Int] = []
+        var darkColumnRatios = [Double](repeating: 0, count: width)
+        for x in 0..<width {
+            var nonWhite = 0
+            var dark = 0
+            for y in yStart..<yEnd {
+                let value = luminances[y * width + x]
+                if value < 0.985 { nonWhite += 1 }
+                if value <= 0.12 { dark += 1 }
+            }
+            if Double(nonWhite) / Double(filmHeight) >= 0.10 {
+                activeColumns.append(x)
+            }
+            darkColumnRatios[x] = Double(dark) / Double(filmHeight)
+        }
+        guard let filmLeft = activeColumns.first,
+              let filmRightInclusive = activeColumns.last else { return nil }
+        let filmRight = filmRightInclusive + 1
+        let filmWidth = filmRight - filmLeft
+        guard filmWidth >= Int(Double(width) * 0.78) else { return nil }
+
+        let darkSegments = thresholdSegments(
+            values: movingAverage(darkColumnRatios, window: max(3, width / 700)),
+            threshold: 0.58,
+            minimumSize: max(3, width / 900),
+            lessThan: false
+        ).filter { segment in
+            let relativeMid = Double(segment.mid - filmLeft) / Double(max(1, filmWidth))
+            return relativeMid >= 0.34 && relativeMid <= 0.66
+                && segment.size <= max(16, width / 8)
+        }
+        guard let divider = darkSegments.max(by: { $0.size < $1.size }) else { return nil }
+
+        let leftWidth = divider.start - filmLeft
+        let rightWidth = filmRight - divider.end
+        guard leftWidth > width / 5,
+              rightWidth > width / 5,
+              Double(max(leftWidth, rightWidth)) / Double(min(leftWidth, rightWidth)) <= 1.55 else { return nil }
+
+        return [
+            CGRect(
+                x: Double(filmLeft) / Double(width),
+                y: Double(yStart) / Double(height),
+                width: Double(leftWidth) / Double(width),
+                height: Double(filmHeight) / Double(height)
+            ).normalized,
+            CGRect(
+                x: Double(divider.end) / Double(width),
+                y: Double(yStart) / Double(height),
+                width: Double(rightWidth) / Double(width),
+                height: Double(filmHeight) / Double(height)
+            ).normalized
+        ]
     }
 
     private static func horizontalFrames(in row: IntSegment, luminances: [Double], width: Int, height: Int) -> [CGRect] {
@@ -4116,6 +4676,9 @@ enum LegacyFrameDetector {
             return keepConsistentNegativeFrames(regularFrames)
         }
 
+        if frames.count >= 2, frames.count <= 4 {
+            return frames
+        }
         if !contentFrames.isEmpty, contentFrames.count <= 4 {
             return contentFrames
         }
@@ -4144,6 +4707,12 @@ enum LegacyFrameDetector {
             return separatorSlotCount
         }
         let ratio = Double(activeWidth) / Double(rowHeight)
+        if let separatorSlotCount, separatorSlotCount == 4, ratio >= 2.65, ratio <= 3.45 {
+            return 4
+        }
+        if separatorSlotCount == nil, ratio >= 2.85, ratio <= 3.35 {
+            return 4
+        }
         let estimated = Int(round(ratio / 1.55))
         if let separatorSlotCount, separatorSlotCount >= 3 && separatorSlotCount <= 12 {
             return abs(separatorSlotCount - estimated) <= 1 ? separatorSlotCount : estimated
@@ -6296,6 +6865,20 @@ private extension Array where Element == CGRect {
             }
             .flatMap { $0.sorted { $0.minX < $1.minX } }
     }
+}
+
+if let detectIndex = CommandLine.arguments.firstIndex(of: "--legacy-detect"),
+   CommandLine.arguments.indices.contains(detectIndex + 1) {
+    let url = URL(fileURLWithPath: CommandLine.arguments[detectIndex + 1])
+    let result = LegacyFrameDetector.insetAdaptiveResult(
+        LegacyFrameDetector.detectBestAutomaticCropsWithReport(url: url)
+    )
+    print("count=\(result.crops.count)")
+    for (index, crop) in result.crops.enumerated() {
+        let rect = crop.rect.normalized
+        print(String(format: "%d x=%.6f y=%.6f w=%.6f h=%.6f", index + 1, rect.minX, rect.minY, rect.width, rect.height))
+    }
+    exit(EXIT_SUCCESS)
 }
 
 LegacyLaunchLog.write("process started")
